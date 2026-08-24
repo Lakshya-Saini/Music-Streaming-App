@@ -5,15 +5,17 @@ NestJS backend for ingesting WAV masters, generating AAC delivery files, storing
 ## Architecture
 
 ```text
-POST /api/v1/tracks
+POST /api/v1/tracks/upload-session
      ↓
-NestJS multipart endpoint
+NestJS creates track + presigned S3 PUT URL
      ↓
-temporary WAV on disk
+browser uploads WAV directly to S3
+     ↓
+POST /api/v1/tracks/:id/process
+     ↓
+NestJS downloads source WAV from S3 to temp disk
      ↓
 ffprobe source validation
-     ↓
-S3 master upload
      ↓
 FFmpeg AAC encoding
      ↓
@@ -28,7 +30,7 @@ MongoDB track + audio asset records
 READY
 ```
 
-The request is processed synchronously for now because early uploads are expected to be low volume. The services are separated so the FFmpeg work can later move into a queue worker without rewriting the controller or persistence model.
+The source upload no longer passes through the NestJS server. The browser uploads the master WAV directly to S3 using a short-lived presigned PUT URL, then the backend synchronously downloads that private source object for ffprobe and FFmpeg processing. The processing request is still synchronous for now because early uploads are expected to be low volume. The services are separated so the FFmpeg work can later move into a queue worker without rewriting the controller or persistence model.
 
 ## Requirements
 
@@ -61,27 +63,50 @@ AWS_REGION=us-east-1
 AWS_S3_BUCKET=your-private-bucket-name
 AWS_ACCESS_KEY_ID=
 AWS_SECRET_ACCESS_KEY=
+AWS_REQUIRE_EXPLICIT_CREDENTIALS=true
 FFMPEG_PATH=ffmpeg
 FFPROBE_PATH=ffprobe
 MAX_UPLOAD_SIZE_MB=500
+CLIENT_ORIGIN=http://localhost:5173
 ```
 
-`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are optional when the app runs in an AWS environment with an IAM role. The bucket should remain private; the API stores object keys, not public URLs.
+`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` are required for local Docker Compose unless you mount/configure another AWS credential provider. They remain optional for real AWS deployments that use IAM roles; set `AWS_REQUIRE_EXPLICIT_CREDENTIALS=false` in that case. The bucket should remain private; the API stores object keys, not public URLs.
 
 ## Upload A Track
 
+Step 1: create a track and direct-upload session.
+
 ```bash
-curl -X POST http://localhost:3000/api/v1/tracks \
-  -F "file=@sample.wav" \
-  -F "title=My Test Song" \
-  -F "artist=Test Artist" \
-  -F "album=Test Album" \
-  -F "genre=Rock" \
-  -F "releaseYear=2026" \
-  -F "trackNumber=1"
+curl -X POST http://localhost:3000/api/v1/tracks/upload-session \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "My Test Song",
+    "artist": "Test Artist",
+    "album": "Test Album",
+    "genre": "Rock",
+    "releaseYear": 2026,
+    "trackNumber": 1,
+    "fileName": "sample.wav",
+    "contentType": "audio/wav",
+    "sizeBytes": 52920314
+  }'
 ```
 
-Only WAV uploads are accepted. The server checks extension, MIME type, and ffprobe metadata; ffprobe is the important check because filenames and MIME types can be wrong.
+Step 2: upload the WAV directly to S3 using the returned URL.
+
+```bash
+curl -X PUT "<upload.url from step 1>" \
+  -H "Content-Type: audio/wav" \
+  --upload-file sample.wav
+```
+
+Step 3: trigger backend processing.
+
+```bash
+curl -X POST http://localhost:3000/api/v1/tracks/<trackId>/process
+```
+
+Only WAV uploads are accepted. The session endpoint checks filename, MIME type, and declared size before issuing a URL. The processing endpoint downloads the S3 object and uses ffprobe as the real validation step because filenames and MIME types can be wrong.
 
 Example response:
 
@@ -125,6 +150,47 @@ curl "http://localhost:3000/api/v1/tracks/<trackId>"
 ```
 
 The list endpoint supports `artist`, `album`, `genre`, `status`, `page`, and `limit`.
+
+## Docker Compose
+
+From the project root:
+
+```bash
+docker compose build
+docker compose up
+```
+
+This builds the React client, NestJS server, and starts MongoDB. Set `AWS_REGION`, `AWS_S3_BUCKET`, `AWS_ACCESS_KEY_ID`, and `AWS_SECRET_ACCESS_KEY` in your shell or a root `.env` file before using upload/processing endpoints.
+
+The client is served on:
+
+```text
+http://localhost:5173
+```
+
+The server API is served on:
+
+```text
+http://localhost:3000/api/v1
+```
+
+Your S3 bucket also needs CORS rules that allow the browser origin to PUT WAV objects using presigned URLs. Keep the bucket private; presigned upload URLs grant temporary write access to one object key.
+
+Example S3 bucket CORS configuration for local development:
+
+```json
+[
+  {
+    "AllowedHeaders": ["*"],
+    "AllowedMethods": ["PUT", "GET", "HEAD"],
+    "AllowedOrigins": ["http://localhost:5173"],
+    "ExposeHeaders": ["ETag"],
+    "MaxAgeSeconds": 3000
+  }
+]
+```
+
+In AWS Console, open the S3 bucket, go to **Permissions**, then **Cross-origin resource sharing (CORS)** and paste the JSON above. Without this, the browser will block the direct upload even though the presigned URL is valid.
 
 ## S3 Layout
 

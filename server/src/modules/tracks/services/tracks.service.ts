@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  HttpException,
   Injectable,
   InternalServerErrorException,
   Logger,
@@ -9,9 +10,9 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
-import { rm } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
-import { UploadTrackDto } from '../dto/upload-track.dto';
+import { mkdir, rm } from 'node:fs/promises';
+import { extname, join } from 'node:path';
+import { InitiateTrackUploadDto } from '../dto/initiate-track-upload.dto';
 import { ListTracksQueryDto } from '../dto/list-tracks-query.dto';
 import { AUDIO_VERSION } from '../constants/audio-renditions';
 import { AudioAssetStatus, ProcessingStage, TrackStatus } from '../constants/track-status';
@@ -19,14 +20,10 @@ import { AudioProcessingService } from './audio-processing.service';
 import { AudioStorageService } from './audio-storage.service';
 import { Track, TrackDocument } from '../schemas/track.schema';
 import { AudioAsset, AudioAssetDocument } from '../schemas/audio-asset.schema';
-import { AudioMetadata, EncodedAudioResult } from '../interfaces/audio-metadata.interface';
+import { EncodedAudioResult } from '../interfaces/audio-metadata.interface';
 
-export interface UploadedDiskFile {
-  path: string;
-  originalname: string;
-  mimetype: string;
-  size: number;
-}
+const PRESIGNED_UPLOAD_EXPIRES_SECONDS = 15 * 60;
+const SOURCE_CONTENT_TYPE = 'audio/wav';
 
 @Injectable()
 export class TracksService {
@@ -40,56 +37,121 @@ export class TracksService {
     private readonly config: ConfigService,
   ) {}
 
-  async createTrack(dto: UploadTrackDto, file?: UploadedDiskFile): Promise<Record<string, unknown>> {
-    if (!file) {
-      throw new BadRequestException('A WAV audio file is required');
-    }
+  async createUploadSession(dto: InitiateTrackUploadDto): Promise<Record<string, unknown>> {
+    this.assertDirectUploadRequest(dto);
 
-    const tempDir = dirname(file.path);
-
-    try {
-      this.assertWavUploadShape(file);
-      this.assertUploadSize(file);
-    } catch (error) {
-      await rm(tempDir, { recursive: true, force: true });
-      throw error;
-    }
+    const trackObjectId = new Types.ObjectId();
+    const trackId = trackObjectId.toString();
+    const sourceObjectKey = this.sourceObjectKey(trackId);
+    const uploadUrlExpiresAt = new Date(Date.now() + PRESIGNED_UPLOAD_EXPIRES_SECONDS * 1000);
 
     const track = await this.trackModel.create({
-      ...dto,
+      _id: trackObjectId,
+      title: dto.title,
+      artist: dto.artist,
+      album: dto.album,
+      albumArtist: dto.albumArtist,
+      genre: dto.genre,
+      releaseYear: dto.releaseYear,
+      trackNumber: dto.trackNumber,
+      discNumber: dto.discNumber,
+      composer: dto.composer,
+      copyright: dto.copyright,
+      language: dto.language,
+      isrc: dto.isrc,
       status: TrackStatus.UPLOADING,
       activeAudioVersion: AUDIO_VERSION,
+      sourceUpload: {
+        objectKey: sourceObjectKey,
+        originalFileName: dto.fileName,
+        contentType: SOURCE_CONTENT_TYPE,
+        expectedSizeBytes: dto.sizeBytes,
+        expectedChecksumSha256: dto.checksumSha256,
+        uploadUrlExpiresAt,
+      },
     });
 
+    const uploadUrl = await this.audioStorage.createPresignedUploadUrl({
+      objectKey: sourceObjectKey,
+      contentType: SOURCE_CONTENT_TYPE,
+      expiresInSeconds: PRESIGNED_UPLOAD_EXPIRES_SECONDS,
+    });
+
+    this.logger.log(`Created direct S3 upload session for track ${trackId}`);
+
+    return {
+      track: this.toTrackResponse(track, []),
+      upload: {
+        method: 'PUT',
+        url: uploadUrl,
+        objectKey: sourceObjectKey,
+        expiresAt: uploadUrlExpiresAt,
+        headers: {
+          'Content-Type': SOURCE_CONTENT_TYPE,
+        },
+      },
+      next: {
+        method: 'POST',
+        path: `/api/v1/tracks/${trackId}/process`,
+      },
+    };
+  }
+
+  async processUploadedTrack(id: string): Promise<Record<string, unknown>> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('Invalid track id');
+    }
+
+    const track = await this.trackModel.findById(id).exec();
+    if (!track) {
+      throw new NotFoundException('Track not found');
+    }
+    if (!track.sourceUpload) {
+      throw new BadRequestException('Track does not have a pending source upload');
+    }
+    if (track.status === TrackStatus.READY) {
+      const assets = await this.findAssets(track._id);
+      return this.toTrackResponse(track, assets);
+    }
+
     const trackId = track._id.toString();
+    const tempDir = join(process.cwd(), 'temp', trackId);
+    const sourcePath = join(tempDir, 'source.wav');
     const uploadedOutputKeys: string[] = [];
 
-    this.logger.log(`Track upload started for ${trackId}`);
+    this.logger.log(`Track processing started for ${trackId}`);
 
     try {
+      await mkdir(tempDir, { recursive: true });
+
+      const sourceObjectKey = track.sourceUpload.objectKey;
+      const sourceInfo = await this.runStage(
+        ProcessingStage.VERIFY_SOURCE_UPLOAD,
+        track,
+        () => this.audioStorage.getObjectInfo(sourceObjectKey),
+      );
+      this.assertUploadedSourceObject(track, sourceInfo.sizeBytes, sourceInfo.contentType);
+
+      await this.runStage(ProcessingStage.DOWNLOAD_SOURCE, track, () =>
+        this.audioStorage.downloadFile(sourceObjectKey, sourcePath),
+      );
+      this.logger.log(`Downloaded source from S3 for track ${trackId}`);
+
       const sourceMetadata = await this.runStage(
         ProcessingStage.PROBE_SOURCE,
         track,
-        () => this.audioProcessing.probeAudio(file.path),
+        () => this.audioProcessing.probeAudio(sourcePath),
       );
       this.audioProcessing.validateSourceWav(sourceMetadata);
       this.logger.log(`ffprobe completed for track ${trackId}`);
 
-      const sourceChecksum = await this.audioProcessing.calculateSha256(file.path);
-      const sourceObjectKey = this.sourceObjectKey(trackId);
-
-      await this.runStage(ProcessingStage.UPLOAD_SOURCE, track, async () => {
-        await this.audioStorage.uploadFile({
-          filePath: file.path,
-          objectKey: sourceObjectKey,
-          contentType: 'audio/wav',
-          metadata: {
-            checksumsha256: sourceChecksum,
-            codec: sourceMetadata.codec,
-          },
-        });
-      });
-      this.logger.log(`Source uploaded for track ${trackId}`);
+      const sourceChecksum = await this.audioProcessing.calculateSha256(sourcePath);
+      if (
+        track.sourceUpload.expectedChecksumSha256 &&
+        track.sourceUpload.expectedChecksumSha256 !== sourceChecksum
+      ) {
+        throw new BadRequestException('Uploaded WAV checksum does not match the expected checksum');
+      }
 
       await this.trackModel.updateOne(
         { _id: track._id },
@@ -112,7 +174,7 @@ export class TracksService {
         const stage = `ENCODE_${rendition.label}` as ProcessingStage;
         encodedResults.push(
           await this.runStage(stage, track, () =>
-            this.audioProcessing.encodeRendition(file.path, outputPath, rendition, trackId),
+            this.audioProcessing.encodeRendition(sourcePath, outputPath, rendition, trackId),
           ),
         );
       }
@@ -135,14 +197,18 @@ export class TracksService {
         });
       }
 
-      const assets = await this.runStage(ProcessingStage.DATABASE, track, () =>
-        this.audioAssetModel.insertMany(
+      const assets = await this.runStage(ProcessingStage.DATABASE, track, async () => {
+        await this.audioAssetModel.deleteMany({
+          trackId: track._id,
+          version: AUDIO_VERSION,
+        });
+        return this.audioAssetModel.insertMany(
           encodedResults.map((encoded) =>
             this.toAudioAssetDocument(track._id, trackId, encoded),
           ),
           { ordered: true },
-        ),
-      );
+        );
+      });
 
       /**
        * S3 and MongoDB are not one transaction. The READY flag is the durable
@@ -165,9 +231,9 @@ export class TracksService {
       await this.markFailed(track._id, error);
 
       /**
-       * Preserve the source WAV in S3 after a failure. It is the expensive,
-       * user-supplied master and can support a future retry. Delivery assets
-       * are derived data, so uploaded partial renditions are deleted.
+       * The original master stays in S3 because it was uploaded directly by the
+       * client and can be reused for a retry. Derived delivery assets are safe
+       * to delete when a partial processing run fails.
        */
       await this.cleanupUploadedRenditions(uploadedOutputKeys, trackId);
       this.logger.error(`Track processing failed for ${trackId}`, this.errorMessage(error));
@@ -221,27 +287,46 @@ export class TracksService {
       throw new NotFoundException('Track not found');
     }
 
-    const assets = await this.audioAssetModel
-      .find({ trackId: track._id })
-      .sort({ version: 1, bitrate: 1 })
-      .exec();
-
+    const assets = await this.findAssets(track._id);
     return this.toTrackResponse(track, assets);
   }
 
-  private assertWavUploadShape(file: UploadedDiskFile): void {
-    const extension = basename(file.originalname).toLowerCase().split('.').pop();
+  private assertDirectUploadRequest(dto: InitiateTrackUploadDto): void {
     const acceptedMimeTypes = new Set(['audio/wav', 'audio/wave', 'audio/x-wav', 'audio/vnd.wave']);
-    if (extension !== 'wav' || !acceptedMimeTypes.has(file.mimetype)) {
+    const extension = extname(dto.fileName).toLowerCase();
+    if (extension !== '.wav' || !acceptedMimeTypes.has(dto.contentType)) {
       throw new BadRequestException('Only valid WAV audio files are supported');
+    }
+
+    const maxSizeMb = this.config.getOrThrow<number>('upload.maxSizeMb');
+    const maxBytes = maxSizeMb * 1024 * 1024;
+    if (dto.sizeBytes > maxBytes) {
+      throw new PayloadTooLargeException(`File exceeds maximum upload size of ${maxSizeMb} MB`);
     }
   }
 
-  private assertUploadSize(file: UploadedDiskFile): void {
+  private assertUploadedSourceObject(
+    track: TrackDocument,
+    uploadedSizeBytes?: number,
+    uploadedContentType?: string,
+  ): void {
+    if (!uploadedSizeBytes || uploadedSizeBytes <= 0) {
+      throw new BadRequestException('Source WAV has not been uploaded to S3');
+    }
+
     const maxSizeMb = this.config.getOrThrow<number>('upload.maxSizeMb');
     const maxBytes = maxSizeMb * 1024 * 1024;
-    if (file.size > maxBytes) {
-      throw new PayloadTooLargeException(`File exceeds maximum upload size of ${maxSizeMb} MB`);
+    if (uploadedSizeBytes > maxBytes) {
+      throw new PayloadTooLargeException(`Uploaded source exceeds maximum size of ${maxSizeMb} MB`);
+    }
+
+    if (track.sourceUpload && uploadedSizeBytes !== track.sourceUpload.expectedSizeBytes) {
+      throw new BadRequestException('Uploaded source size does not match the expected size');
+    }
+
+    const acceptedMimeTypes = new Set(['audio/wav', 'audio/wave', 'audio/x-wav', 'audio/vnd.wave']);
+    if (uploadedContentType && !acceptedMimeTypes.has(uploadedContentType)) {
+      throw new BadRequestException('Uploaded source has an unsupported content type');
     }
   }
 
@@ -302,6 +387,13 @@ export class TracksService {
     return `music/tracks/${trackId}/audio/v${AUDIO_VERSION}/aac-${bitrate / 1000}.m4a`;
   }
 
+  private findAssets(trackId: Types.ObjectId): Promise<AudioAssetDocument[]> {
+    return this.audioAssetModel
+      .find({ trackId })
+      .sort({ version: 1, bitrate: 1 })
+      .exec();
+  }
+
   private async cleanupUploadedRenditions(objectKeys: string[], trackId: string): Promise<void> {
     for (const objectKey of objectKeys) {
       try {
@@ -350,6 +442,7 @@ export class TracksService {
       durationMs: raw.durationMs,
       status: raw.status,
       activeAudioVersion: raw.activeAudioVersion,
+      sourceUpload: raw.sourceUpload,
       source: raw.source,
       processingError: raw.processingError,
       audioAssets: assets.map((asset) => {
@@ -377,11 +470,7 @@ export class TracksService {
   }
 
   private publicError(error: unknown): Error {
-    if (
-      error instanceof BadRequestException ||
-      error instanceof NotFoundException ||
-      error instanceof InternalServerErrorException
-    ) {
+    if (error instanceof HttpException) {
       return error;
     }
     return new InternalServerErrorException('Track processing failed');

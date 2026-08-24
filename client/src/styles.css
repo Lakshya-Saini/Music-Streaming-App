@@ -526,6 +526,11 @@ input {
   background: color-mix(in srgb, var(--accent-2) 10%, transparent);
 }
 
+.stage-row.failed {
+  border-color: color-mix(in srgb, #ff453a 54%, transparent);
+  background: color-mix(in srgb, #ff453a 10%, transparent);
+}
+
 .stage-icon {
   width: 36px;
   height: 36px;
@@ -542,6 +547,16 @@ input {
 
 .stage-row.complete .stage-icon {
   color: var(--accent-2);
+}
+
+.stage-row.failed .stage-icon {
+  color: #ff453a;
+}
+
+.upload-error {
+  color: #ff453a;
+  font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .spin {

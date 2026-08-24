@@ -13,6 +13,7 @@ import { CheckCircle2, Cloud, FileAudio2, Home, Loader2, Moon, Music2, ShieldChe
 import { ChangeEvent, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { AppMode } from '../App';
+import { createUploadSession, processUploadedTrack, uploadFileToS3 } from '../api/tracks';
 import { UploadStage } from '../types';
 
 const initialStages: UploadStage[] = [
@@ -68,6 +69,9 @@ interface UploadPageProps {
 export function UploadPage({ mode, onToggleMode }: UploadPageProps) {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [stages, setStages] = useState<UploadStage[]>(initialStages);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
   const [form, setForm] = useState({
     title: '',
     artist: '',
@@ -88,33 +92,77 @@ export function UploadPage({ mode, onToggleMode }: UploadPageProps) {
     setForm((current) => ({ ...current, [field]: value }));
   };
 
-  const previewPipeline = () => {
+  const setStageStatus = (stageId: string, status: UploadStage['status']) => {
     setStages((current) =>
-      current.map((stage, index) => ({
-        ...stage,
-        status: index === 0 ? 'active' : 'waiting',
-      })),
+      current.map((stage) => (stage.id === stageId ? { ...stage, status } : stage)),
     );
+  };
 
-    initialStages.forEach((_, index) => {
-      window.setTimeout(() => {
-        setStages((current) =>
-          current.map((stage, stageIndex) => {
-            if (stageIndex < index) return { ...stage, status: 'complete' };
-            if (stageIndex === index) return { ...stage, status: 'active' };
-            return { ...stage, status: 'waiting' };
-          }),
-        );
-      }, index * 520);
+  const resetPipeline = () => {
+    setStages(initialStages);
+    setUploadProgress(0);
+    setErrorMessage(null);
+  };
 
-      window.setTimeout(() => {
-        setStages((current) =>
-          current.map((stage, stageIndex) =>
-            stageIndex <= index ? { ...stage, status: 'complete' } : stage,
-          ),
-        );
-      }, index * 520 + 420);
-    });
+  const startUpload = async () => {
+    if (!selectedFile) return;
+
+    resetPipeline();
+    setBusy(true);
+    let activeStageId: string | null = null;
+
+    const activateStage = (stageId: string) => {
+      activeStageId = stageId;
+      setStageStatus(stageId, 'active');
+    };
+
+    const completeStage = (stageId: string) => {
+      setStageStatus(stageId, 'complete');
+      if (activeStageId === stageId) {
+        activeStageId = null;
+      }
+    };
+
+    try {
+      activateStage('presigned-url');
+      const session = await createUploadSession({
+        title: form.title,
+        artist: form.artist,
+        album: form.album || undefined,
+        genre: form.genre || undefined,
+        releaseYear: form.releaseYear ? Number(form.releaseYear) : undefined,
+        trackNumber: form.trackNumber ? Number(form.trackNumber) : undefined,
+        fileName: selectedFile.name,
+        contentType: selectedFile.type || 'audio/wav',
+        sizeBytes: selectedFile.size,
+      });
+      completeStage('presigned-url');
+
+      activateStage('source-upload');
+      await uploadFileToS3(
+        session.upload.url,
+        selectedFile,
+        session.upload.headers,
+        setUploadProgress,
+      );
+      completeStage('source-upload');
+
+      completeStage('metadata');
+      activateStage('aac');
+      await processUploadedTrack(session.track.id);
+
+      completeStage('aac');
+      completeStage('validation');
+      completeStage('delivery-upload');
+      completeStage('ready');
+    } catch (error) {
+      if (activeStageId) {
+        setStageStatus(activeStageId, 'failed');
+      }
+      setErrorMessage(error instanceof Error ? error.message : 'Upload failed');
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -185,11 +233,12 @@ export function UploadPage({ mode, onToggleMode }: UploadPageProps) {
             variant="contained"
             size="large"
             startIcon={<Cloud size={19} />}
-            disabled={!selectedFile || !form.title || !form.artist}
-            onClick={previewPipeline}
+            disabled={busy || !selectedFile || !form.title || !form.artist}
+            onClick={startUpload}
           >
-            Preview upload pipeline
+            {busy ? 'Uploading...' : 'Upload song'}
           </Button>
+          {errorMessage && <Typography className="upload-error">{errorMessage}</Typography>}
         </Box>
 
         <Box className="status-panel">
@@ -198,7 +247,9 @@ export function UploadPage({ mode, onToggleMode }: UploadPageProps) {
               <Typography component="h2" className="section-title">
                 Processing status
               </Typography>
-              <Typography className="section-subtitle">Each step will be wired to backend events later.</Typography>
+              <Typography className="section-subtitle">
+                Source upload progress: {uploadProgress}%
+              </Typography>
             </Box>
             <Chip label={`${completedCount}/${stages.length}`} className="soft-chip" />
           </Box>
@@ -221,7 +272,7 @@ export function UploadPage({ mode, onToggleMode }: UploadPageProps) {
                     <FileAudio2 size={20} />
                   )}
                 </Box>
-                <Box>
+                <Box className="stage-copy">
                   <Typography className="stage-title">{stage.label}</Typography>
                   <Typography className="stage-detail">{stage.detail}</Typography>
                 </Box>

@@ -2,17 +2,37 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import {
   DeleteObjectCommand,
+  GetObjectCommand,
   HeadObjectCommand,
+  HeadObjectCommandOutput,
   PutObjectCommand,
   S3Client,
 } from '@aws-sdk/client-s3';
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createReadStream } from 'node:fs';
+import { createWriteStream } from 'node:fs';
+import { pipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
 
 export interface UploadFileOptions {
   filePath: string;
   objectKey: string;
   contentType: string;
   cacheControl?: string;
+  metadata?: Record<string, string>;
+}
+
+export interface PresignedUploadOptions {
+  objectKey: string;
+  contentType: string;
+  expiresInSeconds: number;
+  metadata?: Record<string, string>;
+}
+
+export interface ObjectInfo {
+  objectKey: string;
+  sizeBytes?: number;
+  contentType?: string;
   metadata?: Record<string, string>;
 }
 
@@ -50,6 +70,34 @@ export class AudioStorageService {
     );
   }
 
+  async createPresignedUploadUrl(options: PresignedUploadOptions): Promise<string> {
+    const command = new PutObjectCommand({
+      Bucket: this.bucket,
+      Key: options.objectKey,
+      ContentType: options.contentType,
+      Metadata: options.metadata,
+    });
+
+    return getSignedUrl(this.s3, command, {
+      expiresIn: options.expiresInSeconds,
+    });
+  }
+
+  async downloadFile(objectKey: string, destinationPath: string): Promise<void> {
+    const response = await this.s3.send(
+      new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: objectKey,
+      }),
+    );
+
+    if (!response.Body) {
+      throw new Error(`S3 object has no body: ${objectKey}`);
+    }
+
+    await pipeline(response.Body as Readable, createWriteStream(destinationPath));
+  }
+
   async deleteFile(objectKey: string): Promise<void> {
     await this.s3.send(
       new DeleteObjectCommand({
@@ -72,5 +120,21 @@ export class AudioStorageService {
       this.logger.debug(`S3 object missing or inaccessible: ${objectKey}`);
       return false;
     }
+  }
+
+  async getObjectInfo(objectKey: string): Promise<ObjectInfo> {
+    const response: HeadObjectCommandOutput = await this.s3.send(
+      new HeadObjectCommand({
+        Bucket: this.bucket,
+        Key: objectKey,
+      }),
+    );
+
+    return {
+      objectKey,
+      sizeBytes: response.ContentLength,
+      contentType: response.ContentType,
+      metadata: response.Metadata,
+    };
   }
 }

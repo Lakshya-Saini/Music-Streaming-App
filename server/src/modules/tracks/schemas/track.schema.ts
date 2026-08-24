@@ -46,6 +46,27 @@ export class ProcessingError {
   stage?: string;
 }
 
+@Schema({ _id: false })
+export class SourceUpload {
+  @Prop({ required: true })
+  objectKey!: string;
+
+  @Prop({ required: true })
+  originalFileName!: string;
+
+  @Prop({ required: true })
+  contentType!: string;
+
+  @Prop({ required: true })
+  expectedSizeBytes!: number;
+
+  @Prop()
+  expectedChecksumSha256?: string;
+
+  @Prop()
+  uploadUrlExpiresAt?: Date;
+}
+
 @Schema({ timestamps: true, collection: 'tracks' })
 export class Track {
   @Prop({ required: true, trim: true, index: true })
@@ -99,6 +120,9 @@ export class Track {
    */
   @Prop({ type: SourceAudio })
   source?: SourceAudio;
+
+  @Prop({ type: SourceUpload })
+  sourceUpload?: SourceUpload;
 
   @Prop({ type: ProcessingError })
   processingError?: ProcessingError;
