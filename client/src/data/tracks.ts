@@ -13,6 +13,7 @@ export const tracks: Track[] = [
     cover: '/covers/aurora-drive.svg',
     color: '#246bfe',
     streamUrl: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-1.mp3',
+    audioAssets: [],
   },
   {
     id: 'trk_afterglow',
@@ -26,6 +27,7 @@ export const tracks: Track[] = [
     cover: '/covers/afterglow-room.svg',
     color: '#12a28c',
     streamUrl: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-2.mp3',
+    audioAssets: [],
   },
   {
     id: 'trk_midnight',
@@ -39,6 +41,7 @@ export const tracks: Track[] = [
     cover: '/covers/midnight-ledger.svg',
     color: '#d15a3b',
     streamUrl: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-3.mp3',
+    audioAssets: [],
   },
   {
     id: 'trk_kites',
@@ -52,6 +55,7 @@ export const tracks: Track[] = [
     cover: '/covers/paper-kites.svg',
     color: '#8a5cf6',
     streamUrl: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-4.mp3',
+    audioAssets: [],
   },
   {
     id: 'trk_coastline',
@@ -65,5 +69,6 @@ export const tracks: Track[] = [
     cover: '/covers/coastline-static.svg',
     color: '#e1a500',
     streamUrl: 'https://www.soundhelix.com/examples/mp3/SoundHelix-Song-5.mp3',
+    audioAssets: [],
   },
 ];

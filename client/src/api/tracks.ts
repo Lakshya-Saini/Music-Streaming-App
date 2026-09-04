@@ -1,3 +1,5 @@
+import { Track } from '../types';
+
 interface UploadSessionRequest {
   title: string;
   artist: string;
@@ -21,7 +23,50 @@ interface UploadSessionResponse {
   };
 }
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:3000/api/v1';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '/api/v1';
+
+interface ApiAudioAsset {
+  id: string;
+  quality: 'low' | 'normal' | 'high' | 'very_high';
+  bitrate: number;
+  sizeBytes: number;
+  codec: string;
+  container: string;
+  objectKey: string;
+  status: string;
+}
+
+interface ApiTrack {
+  id: string;
+  title: string;
+  artist: string;
+  album?: string;
+  genre?: string;
+  releaseYear?: number;
+  durationMs?: number;
+  audioAssets?: ApiAudioAsset[];
+  streamUrl?: string;
+}
+
+interface ListTracksResponse {
+  data: ApiTrack[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+}
+
+const covers = [
+  '/covers/aurora-drive.svg',
+  '/covers/afterglow-room.svg',
+  '/covers/midnight-ledger.svg',
+  '/covers/paper-kites.svg',
+  '/covers/coastline-static.svg',
+];
+
+const colors = ['#fa233b', '#ff7a00', '#af52de', '#007aff', '#34c759'];
 
 export async function createUploadSession(
   payload: UploadSessionRequest,
@@ -39,6 +84,21 @@ export async function createUploadSession(
   }
 
   return response.json() as Promise<UploadSessionResponse>;
+}
+
+export async function listReadyTracks(): Promise<Track[]> {
+  const response = await fetch(`${API_BASE_URL}/tracks?status=READY&limit=100`);
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+
+  const payload = (await response.json()) as ListTracksResponse;
+  return payload.data.map((track, index) => mapApiTrack(track, index));
+}
+
+export function streamingUrlFor(trackId: string, network: string): string {
+  return `${API_BASE_URL}/tracks/${trackId}/stream?quality=auto&network=${encodeURIComponent(network)}`;
 }
 
 export function uploadFileToS3(
@@ -94,4 +154,24 @@ export async function processUploadedTrack(trackId: string): Promise<unknown> {
   }
 
   return response.json() as Promise<unknown>;
+}
+
+function mapApiTrack(track: ApiTrack, index: number): Track {
+  const assets = track.audioAssets ?? [];
+  const bestAsset = [...assets].sort((left, right) => right.bitrate - left.bitrate)[0];
+
+  return {
+    id: track.id,
+    title: track.title,
+    artist: track.artist,
+    album: track.album ?? 'Single',
+    genre: track.genre ?? 'Music',
+    year: track.releaseYear ?? new Date().getFullYear(),
+    duration: Math.round((track.durationMs ?? 0) / 1000),
+    bitrate: bestAsset ? Math.round(bestAsset.bitrate / 1000) : 0,
+    cover: covers[index % covers.length],
+    color: colors[index % colors.length],
+    streamUrl: streamingUrlFor(track.id, 'unknown'),
+    audioAssets: assets,
+  };
 }

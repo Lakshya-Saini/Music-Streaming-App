@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   DeleteObjectCommand,
   GetObjectCommand,
+  GetObjectCommandOutput,
   HeadObjectCommand,
   HeadObjectCommandOutput,
   PutObjectCommand,
@@ -29,11 +30,24 @@ export interface PresignedUploadOptions {
   metadata?: Record<string, string>;
 }
 
+export interface PresignedDownloadOptions {
+  objectKey: string;
+  expiresInSeconds: number;
+}
+
 export interface ObjectInfo {
   objectKey: string;
   sizeBytes?: number;
   contentType?: string;
   metadata?: Record<string, string>;
+}
+
+export interface ObjectStream {
+  body: Readable;
+  contentLength?: number;
+  contentRange?: string;
+  contentType?: string;
+  acceptRanges?: string;
 }
 
 @Injectable()
@@ -83,6 +97,17 @@ export class AudioStorageService {
     });
   }
 
+  async createPresignedDownloadUrl(options: PresignedDownloadOptions): Promise<string> {
+    const command = new GetObjectCommand({
+      Bucket: this.bucket,
+      Key: options.objectKey,
+    });
+
+    return getSignedUrl(this.s3, command, {
+      expiresIn: options.expiresInSeconds,
+    });
+  }
+
   async downloadFile(objectKey: string, destinationPath: string): Promise<void> {
     const response = await this.s3.send(
       new GetObjectCommand({
@@ -96,6 +121,28 @@ export class AudioStorageService {
     }
 
     await pipeline(response.Body as Readable, createWriteStream(destinationPath));
+  }
+
+  async getObjectStream(objectKey: string, range?: string): Promise<ObjectStream> {
+    const response: GetObjectCommandOutput = await this.s3.send(
+      new GetObjectCommand({
+        Bucket: this.bucket,
+        Key: objectKey,
+        Range: range,
+      }),
+    );
+
+    if (!response.Body) {
+      throw new Error(`S3 object has no body: ${objectKey}`);
+    }
+
+    return {
+      body: response.Body as Readable,
+      contentLength: response.ContentLength,
+      contentRange: response.ContentRange,
+      contentType: response.ContentType,
+      acceptRanges: response.AcceptRanges,
+    };
   }
 
   async deleteFile(objectKey: string): Promise<void> {

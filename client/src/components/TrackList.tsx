@@ -4,11 +4,12 @@ import { formatDuration } from '../utils/format';
 
 interface TrackListProps {
   tracks: Track[];
-  activeTrackId: string;
+  activeTrackId?: string;
   onSelectTrack: (track: Track) => void;
+  loading?: boolean;
 }
 
-export function TrackList({ tracks, activeTrackId, onSelectTrack }: TrackListProps) {
+export function TrackList({ tracks, activeTrackId, onSelectTrack, loading = false }: TrackListProps) {
   return (
     <Box className="track-list-shell">
       <Box className="section-heading-row">
@@ -16,7 +17,9 @@ export function TrackList({ tracks, activeTrackId, onSelectTrack }: TrackListPro
           <Typography component="h2" className="section-title">
             Library
           </Typography>
-          <Typography className="section-subtitle">{tracks.length} songs available</Typography>
+          <Typography className="section-subtitle">
+            {loading ? 'Loading songs from S3-backed catalog' : `${tracks.length} songs available`}
+          </Typography>
         </Box>
       </Box>
 
@@ -47,8 +50,8 @@ export function TrackList({ tracks, activeTrackId, onSelectTrack }: TrackListPro
 
         {tracks.length === 0 && (
           <Box className="empty-state">
-            <Typography className="empty-title">No songs found</Typography>
-            <Typography className="section-subtitle">Try another title, artist, album, or genre.</Typography>
+            <Typography className="empty-title">No songs ready</Typography>
+            <Typography className="section-subtitle">Completed uploads will appear here.</Typography>
           </Box>
         )}
       </Box>

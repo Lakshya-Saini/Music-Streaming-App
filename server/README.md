@@ -32,6 +32,52 @@ READY
 
 The source upload no longer passes through the NestJS server. The browser uploads the master WAV directly to S3 using a short-lived presigned PUT URL, then the backend synchronously downloads that private source object for ffprobe and FFmpeg processing. The processing request is still synchronous for now because early uploads are expected to be low volume. The services are separated so the FFmpeg work can later move into a queue worker without rewriting the controller or persistence model.
 
+## End-to-End Flow
+
+```text
+User opens /upload
+      ↓
+React collects metadata + WAV file details
+      ↓
+POST /api/v1/tracks/upload-session
+      ↓
+NestJS validates title, artist, fileName, contentType, sizeBytes
+      ↓
+MongoDB track is created with status=UPLOADING
+      ↓
+NestJS signs S3 PUT URL for music/tracks/<trackId>/master/source.wav
+      ↓
+React uploads WAV directly to S3 with PUT
+      ↓
+POST /api/v1/tracks/<trackId>/process
+      ↓
+NestJS HEADs the source object to verify upload metadata
+      ↓
+NestJS downloads the private source WAV to server/temp/<trackId>/source.wav
+      ↓
+ffprobe validates that the bytes are actually WAV/PCM audio
+      ↓
+FFmpeg creates AAC-LC M4A renditions: 64k, 128k, 256k, 320k
+      ↓
+ffprobe + FFmpeg decode validation check each rendition
+      ↓
+NestJS uploads each rendition to S3 under audio/v1
+      ↓
+MongoDB audioassets are created
+      ↓
+Track status becomes READY
+      ↓
+React landing page fetches GET /api/v1/tracks?status=READY
+      ↓
+User clicks a song
+      ↓
+HTML audio requests GET /api/v1/tracks/<trackId>/stream?quality=auto&network=<profile>
+      ↓
+NestJS selects a rendition and forwards the browser's Range header to S3
+      ↓
+NestJS streams the selected M4A bytes back with 200/206 media headers
+```
+
 ## Requirements
 
 - Node.js 20 or newer
@@ -151,6 +197,108 @@ curl "http://localhost:3000/api/v1/tracks/<trackId>"
 
 The list endpoint supports `artist`, `album`, `genre`, `status`, `page`, and `limit`.
 
+## Streaming APIs
+
+### List playable tracks
+
+```http
+GET /api/v1/tracks?status=READY&limit=100
+```
+
+The response includes track metadata, current-version audio assets, and a relative `streamUrl`.
+
+```json
+{
+  "data": [
+    {
+      "id": "68ad...",
+      "title": "My Test Song",
+      "artist": "Test Artist",
+      "durationMs": 300000,
+      "status": "READY",
+      "activeAudioVersion": 1,
+      "audioAssets": [
+        {
+          "quality": "low",
+          "bitrate": 64000,
+          "container": "m4a",
+          "objectKey": "music/tracks/68ad.../audio/v1/aac-64.m4a"
+        }
+      ],
+      "streamUrl": "/api/v1/tracks/68ad.../stream?quality=auto"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "limit": 100,
+    "total": 1,
+    "totalPages": 1
+  }
+}
+```
+
+### Stream a track
+
+```http
+GET /api/v1/tracks/:id/stream?quality=auto&network=4g
+```
+
+This endpoint validates the track is READY, selects one generated S3 asset, forwards the browser `Range` header to S3, and streams the response back to the browser.
+
+When the browser requests a byte range, NestJS returns `206 Partial Content` with `Content-Range`, `Content-Length`, and `Accept-Ranges`. This is what makes scrubbing and arrow-key seeking work reliably.
+
+Supported `quality` values:
+
+```text
+auto
+low
+normal
+high
+very_high
+```
+
+Supported `network` values:
+
+```text
+slow-2g -> 64 kbps
+2g      -> 64 kbps
+3g      -> 128 kbps
+4g      -> 320 kbps
+unknown -> 128 kbps
+```
+
+This is adaptive selection, not full adaptive bitrate streaming. The first streaming version chooses the best file before playback starts based on the browser's reported network profile. True mid-song adaptation should use HLS or DASH later.
+
+## Streaming Flow
+
+```text
+React player
+  |
+  | audio.src = /api/v1/tracks/<id>/stream?quality=auto&network=4g
+  v
+NestJS stream endpoint
+  |
+  | find READY track + audioassets
+  | select bitrate
+  | forward Range header to S3 GetObject
+  v
+S3 private object response
+  |
+  | NestJS copies media headers and pipes bytes
+  v
+HTMLAudioElement
+  |
+  | progress/timeupdate events
+  v
+UI shows playback position + contiguous loaded percentage
+```
+
+## Why Proxy Range Requests For Now
+
+NestJS currently proxies the selected M4A stream so it can preserve normal browser media semantics during seeking. Browsers often issue `Range: bytes=...` requests when users scrub, press arrow keys, or jump forward. The server forwards that range to S3 and returns S3's partial response to the browser. The UI displays the contiguous loaded range from the beginning of the song so `Loaded 40%` means the first 40% should remain playable from browser buffer, even when the user jumps back or loses connection.
+
+This is easy to understand and works well for early development, but it means audio bytes pass through the API server. Later, CloudFront can replace this path with signed URLs or signed cookies so S3/CloudFront serves bytes directly while preserving HTTP Range playback.
+
 ## Docker Compose
 
 From the project root:
@@ -184,13 +332,13 @@ Example S3 bucket CORS configuration for local development:
     "AllowedHeaders": ["*"],
     "AllowedMethods": ["PUT", "GET", "HEAD"],
     "AllowedOrigins": ["http://localhost:5173"],
-    "ExposeHeaders": ["ETag"],
+    "ExposeHeaders": ["ETag", "Accept-Ranges", "Content-Range", "Content-Length"],
     "MaxAgeSeconds": 3000
   }
 ]
 ```
 
-In AWS Console, open the S3 bucket, go to **Permissions**, then **Cross-origin resource sharing (CORS)** and paste the JSON above. Without this, the browser will block the direct upload even though the presigned URL is valid.
+In AWS Console, open the S3 bucket, go to **Permissions**, then **Cross-origin resource sharing (CORS)** and paste the JSON above. `PUT` is needed for direct browser upload. `GET` and `HEAD` are useful for later direct-S3 or CloudFront playback. The current NestJS stream endpoint proxies media bytes, so playback itself is governed by API CORS, but keeping S3 CORS ready makes later direct delivery easier.
 
 ## S3 Layout
 
@@ -249,7 +397,7 @@ If processing fails:
 - asynchronous transcoding
 - CloudFront
 - signed URLs
-- HTTP Range playback
+- CloudFront-backed direct HTTP Range playback
 - HLS
 - adaptive bitrate streaming
 - audio waveform generation

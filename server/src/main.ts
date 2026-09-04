@@ -10,7 +10,14 @@ async function bootstrap(): Promise<void> {
   app.enableCors({
     origin: config.get<string>('client.origin') ?? true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Range'],
+    exposedHeaders: [
+      'Accept-Ranges',
+      'Content-Length',
+      'Content-Range',
+      'X-Selected-Bitrate',
+      'X-Selected-Quality',
+    ],
   });
 
   app.setGlobalPrefix('api/v1');

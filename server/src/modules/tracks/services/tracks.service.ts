@@ -14,6 +14,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { extname, join } from 'node:path';
 import { InitiateTrackUploadDto } from '../dto/initiate-track-upload.dto';
 import { ListTracksQueryDto } from '../dto/list-tracks-query.dto';
+import { NetworkProfile, StreamTrackQueryDto, StreamQuality } from '../dto/stream-track-query.dto';
 import { AUDIO_VERSION } from '../constants/audio-renditions';
 import { AudioAssetStatus, ProcessingStage, TrackStatus } from '../constants/track-status';
 import { AudioProcessingService } from './audio-processing.service';
@@ -21,6 +22,7 @@ import { AudioStorageService } from './audio-storage.service';
 import { Track, TrackDocument } from '../schemas/track.schema';
 import { AudioAsset, AudioAssetDocument } from '../schemas/audio-asset.schema';
 import { EncodedAudioResult } from '../interfaces/audio-metadata.interface';
+import { Readable } from 'node:stream';
 
 const PRESIGNED_UPLOAD_EXPIRES_SECONDS = 15 * 60;
 const SOURCE_CONTENT_TYPE = 'audio/wav';
@@ -266,14 +268,115 @@ export class TracksService {
       this.trackModel.countDocuments(filter).exec(),
     ]);
 
+    const trackIds = data.map((track) => track._id);
+    const assets = await this.audioAssetModel
+      .find({
+        trackId: { $in: trackIds },
+        version: AUDIO_VERSION,
+        status: AudioAssetStatus.READY,
+      })
+      .sort({ bitrate: 1 })
+      .lean()
+      .exec();
+    const assetsByTrack = new Map<string, typeof assets>();
+    for (const asset of assets) {
+      const key = asset.trackId.toString();
+      assetsByTrack.set(key, [...(assetsByTrack.get(key) ?? []), asset]);
+    }
+
     return {
-      data: data.map((track) => ({ ...track, id: track._id.toString(), _id: undefined })),
+      data: data.map((track) => {
+        const id = track._id.toString();
+        return {
+          ...track,
+          id,
+          _id: undefined,
+          audioAssets: (assetsByTrack.get(id) ?? []).map((asset) => ({
+            id: asset._id.toString(),
+            quality: asset.quality,
+            bitrate: asset.bitrate,
+            codec: asset.codec,
+            codecProfile: asset.codecProfile,
+            container: asset.container,
+            sampleRate: asset.sampleRate,
+            channels: asset.channels,
+            durationMs: asset.durationMs,
+            sizeBytes: asset.sizeBytes,
+            objectKey: asset.objectKey,
+            status: asset.status,
+          })),
+          streamUrl: this.streamPath(id),
+        };
+      }),
       pagination: {
         page,
         limit,
         total,
         totalPages: Math.ceil(total / limit),
       },
+    };
+  }
+
+  async createStreamingResponse(
+    id: string,
+    query: StreamTrackQueryDto,
+    range?: string,
+  ): Promise<{
+    body: Readable;
+    statusCode: number;
+    headers: Record<string, string | number>;
+  }> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('Invalid track id');
+    }
+
+    const track = await this.trackModel.findById(id).exec();
+    if (!track) {
+      throw new NotFoundException('Track not found');
+    }
+    if (track.status !== TrackStatus.READY) {
+      throw new BadRequestException('Track is not ready for streaming');
+    }
+
+    const assets = await this.audioAssetModel
+      .find({
+        trackId: track._id,
+        version: track.activeAudioVersion,
+        status: AudioAssetStatus.READY,
+      })
+      .sort({ bitrate: 1 })
+      .exec();
+
+    if (assets.length === 0) {
+      throw new NotFoundException('No playable audio renditions were found for this track');
+    }
+
+    const selected = this.selectStreamingAsset(assets, query.quality, query.network);
+    const objectStream = await this.audioStorage.getObjectStream(selected.objectKey, range);
+
+    this.logger.log(
+      `Streaming ${selected.bitrate} bps ${selected.quality} rendition for track ${id}`,
+    );
+
+    const headers: Record<string, string | number> = {
+      'Content-Type': objectStream.contentType ?? 'audio/mp4',
+      'Accept-Ranges': objectStream.acceptRanges ?? 'bytes',
+      'Cache-Control': 'no-store',
+      'X-Selected-Quality': selected.quality,
+      'X-Selected-Bitrate': selected.bitrate,
+    };
+
+    if (objectStream.contentLength !== undefined) {
+      headers['Content-Length'] = objectStream.contentLength;
+    }
+    if (objectStream.contentRange) {
+      headers['Content-Range'] = objectStream.contentRange;
+    }
+
+    return {
+      body: objectStream.body,
+      statusCode: objectStream.contentRange ? 206 : 200,
+      headers,
     };
   }
 
@@ -387,6 +490,10 @@ export class TracksService {
     return `music/tracks/${trackId}/audio/v${AUDIO_VERSION}/aac-${bitrate / 1000}.m4a`;
   }
 
+  private streamPath(trackId: string): string {
+    return `/api/v1/tracks/${trackId}/stream?quality=auto`;
+  }
+
   private findAssets(trackId: Types.ObjectId): Promise<AudioAssetDocument[]> {
     return this.audioAssetModel
       .find({ trackId })
@@ -418,6 +525,41 @@ export class TracksService {
         },
       },
     );
+  }
+
+  private selectStreamingAsset(
+    assets: readonly AudioAssetDocument[],
+    quality: StreamQuality,
+    network: NetworkProfile,
+  ): AudioAssetDocument {
+    if (quality !== 'auto') {
+      const exact = assets.find((asset) => asset.quality === quality);
+      if (exact) {
+        return exact;
+      }
+    }
+
+    const targetBitrate = this.targetBitrateForNetwork(network);
+    const sorted = [...assets].sort((left, right) => left.bitrate - right.bitrate);
+    return (
+      sorted.find((asset) => asset.bitrate >= targetBitrate) ??
+      sorted[sorted.length - 1]
+    );
+  }
+
+  private targetBitrateForNetwork(network: NetworkProfile): number {
+    switch (network) {
+      case 'slow-2g':
+      case '2g':
+        return 64000;
+      case '3g':
+        return 128000;
+      case '4g':
+        return 320000;
+      case 'unknown':
+      default:
+        return 128000;
+    }
   }
 
   private toTrackResponse(

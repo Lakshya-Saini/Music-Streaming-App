@@ -334,8 +334,45 @@ input {
   font-weight: 800;
 }
 
+.player-message {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent-2) 42%, transparent);
+  border-radius: 8px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent-2) 10%, transparent);
+  font-size: 0.9rem;
+  font-weight: 750;
+}
+
 .timeline-block {
   margin-top: auto;
+}
+
+.stream-meter {
+  position: relative;
+  min-height: 34px;
+}
+
+.buffer-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 14px;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--muted) 18%, transparent);
+}
+
+.buffer-track span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+  transition: width 180ms ease;
 }
 
 .time-row,
@@ -437,6 +474,11 @@ input {
 
 .upload-layout {
   gap: 14px;
+}
+
+.empty-player {
+  justify-content: center;
+  align-items: flex-start;
 }
 
 .upload-form-panel,

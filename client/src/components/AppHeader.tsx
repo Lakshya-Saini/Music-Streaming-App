@@ -1,7 +1,7 @@
 import { Box, Button, IconButton, Tooltip, Typography } from '@mui/material';
 import { Moon, Music2, Sun, Upload } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { AppMode } from '../App';
+import type { AppMode } from '../App';
 
 interface AppHeaderProps {
   mode: AppMode;

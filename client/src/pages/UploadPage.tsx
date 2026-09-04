@@ -12,7 +12,7 @@ import {
 import { CheckCircle2, Cloud, FileAudio2, Home, Loader2, Moon, Music2, ShieldCheck, Sun, UploadCloud } from 'lucide-react';
 import { ChangeEvent, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { AppMode } from '../App';
+import type { AppMode } from '../App';
 import { createUploadSession, processUploadedTrack, uploadFileToS3 } from '../api/tracks';
 import { UploadStage } from '../types';
 

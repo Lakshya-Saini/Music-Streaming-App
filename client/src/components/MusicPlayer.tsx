@@ -1,5 +1,6 @@
 import { Box, IconButton, Slider, Tooltip, Typography } from '@mui/material';
 import {
+  AlertTriangle,
   ListMusic,
   Maximize2,
   Pause,
@@ -15,6 +16,8 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Track } from '../types';
 import { formatDuration } from '../utils/format';
+import { streamingUrlFor } from '../api/tracks';
+import { preloadStreamPrefix } from '../utils/streamCache';
 
 interface MusicPlayerProps {
   tracks: Track[];
@@ -26,19 +29,27 @@ type RepeatMode = 'off' | 'one' | 'all';
 
 export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const seekRequestRef = useRef(0);
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
+  const [loadedTime, setLoadedTime] = useState(0);
   const [duration, setDuration] = useState(activeTrack.duration);
   const [volume, setVolume] = useState(0.78);
   const [muted, setMuted] = useState(false);
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState<RepeatMode>('all');
   const [speed, setSpeed] = useState(1);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [preloadingSeek, setPreloadingSeek] = useState(false);
+  const [playerMessage, setPlayerMessage] = useState<string | null>(null);
 
   const activeIndex = useMemo(
     () => tracks.findIndex((track) => track.id === activeTrack.id),
     [activeTrack.id, tracks],
   );
+  const networkProfile = useMemo(() => getNetworkProfile(), []);
+  const loadedPercent = duration > 0 ? Math.min(100, (loadedTime / duration) * 100) : 0;
+  const audioSource = streamingUrlFor(activeTrack.id, networkProfile);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -50,11 +61,57 @@ export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerP
 
   useEffect(() => {
     setCurrentTime(0);
+    setLoadedTime(0);
     setDuration(activeTrack.duration);
-    if (playing) {
-      void audioRef.current?.play();
-    }
-  }, [activeTrack, playing]);
+    setPlayerMessage(null);
+  }, [activeTrack]);
+
+  useEffect(() => {
+    const handleOnline = () => {
+      setOnline(true);
+      setPlayerMessage(null);
+    };
+    const handleOffline = () => {
+      setOnline(false);
+      setPlayerMessage('You are offline. Already streamed audio remains playable.');
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target && ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)) {
+        return;
+      }
+      if (target?.getAttribute('role') === 'slider' || target?.closest('.MuiSlider-root')) {
+        return;
+      }
+
+      if (event.key === 'ArrowRight') {
+        event.preventDefault();
+        seekBy(10);
+      }
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        seekBy(-10);
+      }
+      if (event.key === ' ') {
+        event.preventDefault();
+        void togglePlay();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  });
 
   const selectRelativeTrack = (direction: 1 | -1) => {
     if (tracks.length === 0) return;
@@ -75,16 +132,110 @@ export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerP
       setPlaying(false);
       return;
     }
-    await audio.play();
-    setPlaying(true);
+    if (!navigator.onLine && audio.currentTime > locallyLoadedThrough(audio, loadedTime)) {
+      setOnline(false);
+      setPlayerMessage('You are offline. This position has not been streamed yet.');
+      return;
+    }
+
+    try {
+      await audio.play();
+      setPlaying(true);
+      setPlayerMessage(null);
+    } catch {
+      setPlaying(false);
+      setPlayerMessage('Playback could not start. Check the network request for the stream endpoint.');
+    }
   };
 
   const seek = (_event: Event, value: number | number[]) => {
-    const nextTime = Array.isArray(value) ? value[0] : value;
-    if (audioRef.current) {
-      audioRef.current.currentTime = nextTime;
+    const requestedTime = Array.isArray(value) ? value[0] : value;
+    void seekTo(requestedTime);
+  };
+
+  const seekTo = async (requestedTime: number) => {
+    const audio = audioRef.current;
+    if (!audio) {
+      return;
     }
+
+    const trackDuration = duration || activeTrack.duration;
+    let loadedThrough = locallyLoadedThrough(audio, loadedTime);
+    const seekRequestId = seekRequestRef.current + 1;
+    seekRequestRef.current = seekRequestId;
+
+    if (navigator.onLine && requestedTime > loadedThrough + 1) {
+      setPreloadingSeek(true);
+      setPlayerMessage('Loading skipped audio...');
+      try {
+        const preloaded = await preloadStreamPrefix(
+          activeTrack,
+          audioSource,
+          networkProfile,
+          requestedTime,
+          trackDuration,
+        );
+        if (seekRequestRef.current !== seekRequestId) {
+          return;
+        }
+        if (preloaded) {
+          loadedThrough = Math.max(loadedThrough, requestedTime);
+          setLoadedTime((current) => Math.max(current, requestedTime));
+          setPlayerMessage(null);
+        }
+      } catch {
+        if (seekRequestRef.current !== seekRequestId) {
+          return;
+        }
+        setPlayerMessage('Could not preload the skipped audio. Streaming from the new position.');
+      } finally {
+        if (seekRequestRef.current === seekRequestId) {
+          setPreloadingSeek(false);
+        }
+      }
+    }
+
+    const nextTime = playableSeekTime(audio, requestedTime, trackDuration, loadedThrough);
+    if (!navigator.onLine && nextTime < requestedTime) {
+      setPlayerMessage('That part has not been streamed yet. Reconnect to jump further.');
+    }
+    audio.currentTime = nextTime;
     setCurrentTime(nextTime);
+  };
+
+  const handleTimeUpdate = (audio: HTMLAudioElement) => {
+    if (!navigator.onLine && audio.currentTime + 0.5 > locallyLoadedThrough(audio, loadedTime)) {
+      audio.pause();
+      setOnline(false);
+      setPlaying(false);
+      setPlayerMessage('You reached the end of the streamed audio. Reconnect to continue.');
+      return;
+    }
+    setCurrentTime(audio.currentTime);
+  };
+
+  const seekBy = (seconds: number) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+    const requestedTime = Math.min(
+      Math.max(audio.currentTime + seconds, 0),
+      duration || activeTrack.duration,
+    );
+    void seekTo(requestedTime);
+  };
+
+  const updateBufferedTime = () => {
+    const audio = audioRef.current;
+    if (!audio || audio.buffered.length === 0) {
+      return;
+    }
+
+    setLoadedTime((current) => Math.max(current, contiguousBufferedEnd(audio)));
+  };
+
+  const handlePlayerError = () => {
+    setPlaying(false);
+    setPlayerMessage('Streaming failed. The track may still be processing, the connection may be offline, or the S3 object may be unavailable.');
   };
 
   const handleEnded = () => {
@@ -108,10 +259,19 @@ export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerP
     <Box className="player-shell">
       <audio
         ref={audioRef}
-        src={activeTrack.streamUrl}
+        src={audioSource}
         preload="metadata"
         onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || activeTrack.duration)}
-        onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)}
+        onTimeUpdate={(event) => handleTimeUpdate(event.currentTarget)}
+        onProgress={updateBufferedTime}
+        onCanPlay={updateBufferedTime}
+        onWaiting={() => setPlayerMessage('Buffering audio...')}
+        onPlaying={() => {
+          setPlaying(true);
+          setPlayerMessage(null);
+        }}
+        onPause={() => setPlaying(false)}
+        onError={handlePlayerError}
         onEnded={handleEnded}
       />
 
@@ -126,20 +286,35 @@ export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerP
             <span>{activeTrack.album}</span>
             <span>{activeTrack.genre}</span>
             <span>{activeTrack.year}</span>
+            <span>{networkProfile.toUpperCase()} auto</span>
+            <span>{online ? 'Online' : 'Offline'}</span>
           </Box>
         </Box>
       </Box>
 
+      {playerMessage && (
+        <Box className="player-message">
+          <AlertTriangle size={18} />
+          <span>{playerMessage}</span>
+        </Box>
+      )}
+
       <Box className="timeline-block">
-        <Slider
-          value={Math.min(currentTime, duration || activeTrack.duration)}
-          min={0}
-          max={duration || activeTrack.duration}
-          onChange={seek}
-          aria-label="Playback progress"
-        />
+        <Box className="stream-meter">
+          <Box className="buffer-track">
+            <span style={{ width: `${loadedPercent}%` }} />
+          </Box>
+          <Slider
+            value={Math.min(currentTime, duration || activeTrack.duration)}
+            min={0}
+            max={duration || activeTrack.duration}
+            onChange={seek}
+            aria-label="Playback progress"
+          />
+        </Box>
         <Box className="time-row">
           <span>{formatDuration(currentTime)}</span>
+          <span>{preloadingSeek ? 'Loading seek...' : `Loaded ${Math.round(loadedPercent)}%`}</span>
           <span>{formatDuration(duration || activeTrack.duration)}</span>
         </Box>
       </Box>
@@ -231,4 +406,68 @@ export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerP
       </Box>
     </Box>
   );
+}
+
+function playableSeekTime(
+  audio: HTMLAudioElement,
+  requestedTime: number,
+  duration: number,
+  loadedThrough: number,
+): number {
+  const clampedTime = Math.min(Math.max(requestedTime, 0), duration);
+  if (navigator.onLine || clampedTime <= loadedThrough) {
+    return clampedTime;
+  }
+
+  return Math.min(clampedTime, loadedThrough);
+}
+
+function locallyLoadedThrough(audio: HTMLAudioElement, loadedTime: number): number {
+  return Math.max(loadedTime, contiguousBufferedEnd(audio));
+}
+
+function contiguousBufferedEnd(audio: HTMLAudioElement): number {
+  if (audio.buffered.length === 0) {
+    return 0;
+  }
+
+  let end = 0;
+  for (let index = 0; index < audio.buffered.length; index += 1) {
+    const start = audio.buffered.start(index);
+    const rangeEnd = audio.buffered.end(index);
+    if (start > end + 0.25) {
+      break;
+    }
+    end = Math.max(end, rangeEnd);
+  }
+
+  return end;
+}
+
+function getNetworkProfile(): string {
+  const connection = (
+    navigator as Navigator & {
+      connection?: { effectiveType?: string };
+      mozConnection?: { effectiveType?: string };
+      webkitConnection?: { effectiveType?: string };
+    }
+  ).connection;
+
+  const effectiveType =
+    connection?.effectiveType ??
+    (navigator as Navigator & { mozConnection?: { effectiveType?: string } }).mozConnection
+      ?.effectiveType ??
+    (navigator as Navigator & { webkitConnection?: { effectiveType?: string } }).webkitConnection
+      ?.effectiveType;
+
+  if (
+    effectiveType === 'slow-2g' ||
+    effectiveType === '2g' ||
+    effectiveType === '3g' ||
+    effectiveType === '4g'
+  ) {
+    return effectiveType;
+  }
+
+  return 'unknown';
 }
