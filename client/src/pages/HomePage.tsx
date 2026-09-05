@@ -4,9 +4,12 @@ import { CategoryRow } from '../components/CategoryRow';
 import { RecentBanner } from '../components/RecentBanner';
 import { useLibrary } from '../state/LibraryContext';
 import { Track } from '../types';
-import { languageLabel } from '../utils/languages';
 
 const MAX_PER_CATEGORY = 20;
+/** Caps how many genre rows can appear so the home page never turns into a wall of categories. */
+const MAX_GENRE_ROWS = 4;
+/** A genre only earns its own row once there's enough of it to justify a shelf. */
+const MIN_TRACKS_PER_GENRE = 2;
 
 interface Category {
   key: string;
@@ -14,33 +17,52 @@ interface Category {
   tracks: Track[];
 }
 
+/** Deterministic per-track number so "Trending" has a stable order without needing real play-count data. */
+function hashTrackId(id: string): number {
+  let hash = 0;
+  for (let index = 0; index < id.length; index += 1) {
+    hash = (hash * 31 + id.charCodeAt(index)) | 0;
+  }
+  return hash;
+}
+
 function buildCategories(tracks: Track[]): Category[] {
   if (tracks.length === 0) {
     return [];
   }
 
-  const categories: Category[] = [
-    { key: 'trending', title: 'Trending Songs', tracks: tracks.slice(0, MAX_PER_CATEGORY) },
-  ];
+  const categories: Category[] = [];
 
-  const byLanguage = new Map<string, Track[]>();
+  const recentlyUploaded = [...tracks].sort(
+    (left, right) => new Date(right.createdAt ?? 0).getTime() - new Date(left.createdAt ?? 0).getTime(),
+  );
+  categories.push({
+    key: 'recent',
+    title: 'Recently Uploaded',
+    tracks: recentlyUploaded.slice(0, MAX_PER_CATEGORY),
+  });
+
+  /**
+   * There's no play-count tracking yet, so "Trending" is a stable shuffle
+   * (seeded by track id) rather than real popularity - just enough to keep
+   * this row from being a duplicate of "Recently Uploaded".
+   */
+  const trending = [...tracks].sort((left, right) => hashTrackId(left.id) - hashTrackId(right.id));
+  categories.push({ key: 'trending', title: 'Trending Songs', tracks: trending.slice(0, MAX_PER_CATEGORY) });
+
   const byGenre = new Map<string, Track[]>();
-
   for (const track of tracks) {
-    if (track.language) {
-      const label = languageLabel(track.language);
-      byLanguage.set(label, [...(byLanguage.get(label) ?? []), track]);
-    }
     if (track.genre) {
       byGenre.set(track.genre, [...(byGenre.get(track.genre) ?? []), track]);
     }
   }
 
-  for (const [label, items] of byLanguage) {
-    categories.push({ key: `lang-${label}`, title: `${label} Songs`, tracks: items.slice(0, MAX_PER_CATEGORY) });
-  }
+  const topGenres = [...byGenre.entries()]
+    .filter(([, items]) => items.length >= MIN_TRACKS_PER_GENRE)
+    .sort((left, right) => right[1].length - left[1].length || left[0].localeCompare(right[0]))
+    .slice(0, MAX_GENRE_ROWS);
 
-  for (const [genre, items] of byGenre) {
+  for (const [genre, items] of topGenres) {
     categories.push({ key: `genre-${genre}`, title: `${genre} Songs`, tracks: items.slice(0, MAX_PER_CATEGORY) });
   }
 
