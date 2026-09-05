@@ -1,4 +1,4 @@
-import { Track } from '../types';
+import { AudioAsset, Track } from '../types';
 
 interface UploadSessionRequest {
   title: string;
@@ -137,6 +137,11 @@ export async function listReadyTracks(): Promise<Track[]> {
 
 export function streamingUrlFor(trackId: string, network: string): string {
   return `${API_BASE_URL}/tracks/${trackId}/stream?quality=auto&network=${encodeURIComponent(network)}`;
+}
+
+/** Requests a specific rendition explicitly, bypassing the server's network-guess fallback entirely. */
+export function streamingUrlForQuality(trackId: string, quality: AudioAsset['quality']): string {
+  return `${API_BASE_URL}/tracks/${trackId}/stream?quality=${encodeURIComponent(quality)}`;
 }
 
 export function uploadFileToS3(

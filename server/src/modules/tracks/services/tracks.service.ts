@@ -464,7 +464,16 @@ export class TracksService {
     const headers: Record<string, string | number> = {
       'Content-Type': objectStream.contentType ?? 'audio/mp4',
       'Accept-Ranges': objectStream.acceptRanges ?? 'bytes',
-      'Cache-Control': 'no-store',
+      /**
+       * An explicit quality maps deterministically to one immutable rendition
+       * file, so the browser can safely cache it and replay already-streamed
+       * audio without hitting the network again. `auto` picks a rendition
+       * based on the caller's guessed network profile, so the same URL could
+       * legitimately resolve to a different file between calls - that path
+       * must stay uncached.
+       */
+      'Cache-Control':
+        query.quality === 'auto' ? 'no-store' : 'private, max-age=604800, immutable',
       'X-Selected-Quality': selected.quality,
       'X-Selected-Bitrate': selected.bitrate,
     };

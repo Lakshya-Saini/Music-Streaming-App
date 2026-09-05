@@ -1215,6 +1215,14 @@ a {
   color: var(--danger);
 }
 
+.mini-alert-buffering {
+  color: var(--accent);
+}
+
+.mini-alert-error {
+  color: var(--danger);
+}
+
 .mini-artist {
   color: var(--muted);
   font-size: 0.82rem;

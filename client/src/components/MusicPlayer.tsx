@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ChevronDown,
   ListMusic,
+  Loader2,
   Pause,
   Play,
   Repeat,
@@ -14,10 +15,15 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Track } from '../types';
+import { AudioAsset, Track } from '../types';
 import { formatDuration } from '../utils/format';
-import { streamingUrlFor } from '../api/tracks';
-import { preloadStreamPrefix } from '../utils/streamCache';
+import { streamingUrlForQuality } from '../api/tracks';
+import {
+  nextHigherQuality,
+  nextLowerQuality,
+  pickQualityForThroughput,
+  probeThroughputBytesPerSecond,
+} from '../utils/streamCache';
 
 interface MusicPlayerProps {
   tracks: Track[];
@@ -29,7 +35,14 @@ interface MusicPlayerProps {
 
 type RepeatMode = 'off' | 'one' | 'all';
 
+interface PlayerNotice {
+  kind: 'buffering' | 'error';
+  text: string;
+}
+
 const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+/** How often, while playing, to re-check whether the connection can now sustain a higher rendition. */
+const UPGRADE_CHECK_INTERVAL_MS = 25000;
 
 export function MusicPlayer({
   tracks,
@@ -39,7 +52,8 @@ export function MusicPlayer({
   onToggleQueue,
 }: MusicPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const seekRequestRef = useRef(0);
+  const loadRequestRef = useRef(0);
+  const stallTimestampsRef = useRef<number[]>([]);
   const [speedAnchor, setSpeedAnchor] = useState<HTMLElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -50,16 +64,19 @@ export function MusicPlayer({
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState<RepeatMode>('all');
   const [speed, setSpeed] = useState(1);
-  const [preloadingSeek, setPreloadingSeek] = useState(false);
-  const [playerMessage, setPlayerMessage] = useState<string | null>(null);
+  const [notice, setNotice] = useState<PlayerNotice | null>(null);
+  const [currentAsset, setCurrentAsset] = useState<AudioAsset | null>(null);
 
   const activeIndex = useMemo(
     () => tracks.findIndex((track) => track.id === activeTrack.id),
     [activeTrack.id, tracks],
   );
-  const networkProfile = useMemo(() => getNetworkProfile(), []);
   const loadedPercent = duration > 0 ? Math.min(100, (loadedTime / duration) * 100) : 0;
-  const audioSource = streamingUrlFor(activeTrack.id, networkProfile);
+  const isBuffering = notice?.kind === 'buffering';
+
+  const showBuffering = (text: string) => setNotice({ kind: 'buffering', text });
+  const showError = (text: string) => setNotice({ kind: 'error', text });
+  const clearNotice = () => setNotice(null);
 
   useEffect(() => {
     const audio = audioRef.current;
@@ -69,20 +86,59 @@ export function MusicPlayer({
     audio.playbackRate = speed;
   }, [muted, speed, volume]);
 
+  /**
+   * The stream is only ever loaded lazily (see ensureStreamReady), so switching
+   * tracks just tears down whatever was playing. If music was already playing
+   * when the track changed (Next/Prev/auto-advance), it resumes automatically;
+   * otherwise the next stream doesn't start until Play is pressed again.
+   */
   useEffect(() => {
+    const audio = audioRef.current;
+    const shouldContinuePlaying = playing;
+
     setCurrentTime(0);
     setLoadedTime(0);
     setDuration(activeTrack.duration);
-    setPlayerMessage(null);
+    clearNotice();
+    setCurrentAsset(null);
+    stallTimestampsRef.current = [];
+
+    if (!audio) return;
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+
+    if (shouldContinuePlaying) {
+      void (async () => {
+        const asset = await ensureStreamReady();
+        if (!asset || audioRef.current !== audio) return;
+        try {
+          await audio.play();
+          setPlaying(true);
+        } catch {
+          setPlaying(false);
+          showError('Playback could not start for this track.');
+        }
+      })();
+    } else {
+      setPlaying(false);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTrack]);
 
+  /** Every so often, check whether the connection now supports a better rendition than the one picked at play time. */
   useEffect(() => {
-    const handleOnline = () => {
-      setPlayerMessage(null);
-    };
-    const handleOffline = () => {
-      setPlayerMessage('You are offline. Already streamed audio remains playable.');
-    };
+    if (!playing || !currentAsset) return;
+    const interval = setInterval(() => {
+      void maybeUpgradeQuality();
+    }, UPGRADE_CHECK_INTERVAL_MS);
+    return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [playing, currentAsset, activeTrack]);
+
+  useEffect(() => {
+    const handleOnline = () => clearNotice();
+    const handleOffline = () => showError('You are offline. Already streamed audio remains playable.');
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
@@ -132,6 +188,86 @@ export function MusicPlayer({
     onTrackChange(tracks[nextIndex]);
   };
 
+  /**
+   * The stream is never attached until this runs, so nothing downloads just
+   * from selecting a track. It picks a rendition by measuring real throughput
+   * against the smallest file (immune to navigator.connection's blind spots,
+   * like DevTools throttling) instead of trusting a reported connection type.
+   * If a stream is already loaded for this track, it's reused as-is - no
+   * re-probing or re-fetching of audio already sitting in the browser.
+   */
+  const ensureStreamReady = async (): Promise<AudioAsset | null> => {
+    const audio = audioRef.current;
+    if (!audio) return null;
+    if (audio.src && currentAsset) {
+      return currentAsset;
+    }
+
+    const requestId = loadRequestRef.current + 1;
+    loadRequestRef.current = requestId;
+
+    showBuffering('Preparing stream...');
+    const measured = await probeThroughputBytesPerSecond(activeTrack);
+    if (loadRequestRef.current !== requestId || audioRef.current !== audio) {
+      return null;
+    }
+
+    const asset = pickQualityForThroughput(activeTrack, measured);
+    if (!asset) {
+      showError('No playable audio found for this track.');
+      return null;
+    }
+
+    setCurrentAsset(asset);
+    audio.src = streamingUrlForQuality(activeTrack.id, asset.quality);
+    audio.load();
+    clearNotice();
+    return asset;
+  };
+
+  /** Swaps to a different rendition in place, preserving position and resuming playback if it was already playing. */
+  const switchToAsset = (nextAsset: AudioAsset, noticeText: string) => {
+    const audio = audioRef.current;
+    if (!audio) return;
+
+    const resumeAt = audio.currentTime;
+    const wasPlaying = playing;
+    showBuffering(noticeText);
+    setCurrentAsset(nextAsset);
+    audio.src = streamingUrlForQuality(activeTrack.id, nextAsset.quality);
+
+    const onReady = () => {
+      audio.removeEventListener('loadedmetadata', onReady);
+      audio.currentTime = resumeAt;
+      if (wasPlaying) {
+        void audio.play().catch(() => showError('Playback could not resume after switching quality.'));
+      }
+      clearNotice();
+    };
+    audio.addEventListener('loadedmetadata', onReady);
+    audio.load();
+  };
+
+  /** Drops to the next lower rendition in place, keeping playback position. */
+  const downgradeQuality = () => {
+    if (!currentAsset) return;
+    const lower = nextLowerQuality(activeTrack, currentAsset.id);
+    if (!lower) return;
+    switchToAsset(lower, 'Switching to a lower quality stream...');
+  };
+
+  /** Opportunistic upgrade once conditions look better than what the current rendition needs. */
+  const maybeUpgradeQuality = async () => {
+    if (!currentAsset) return;
+    const higher = nextHigherQuality(activeTrack, currentAsset.id);
+    if (!higher) return;
+
+    const measured = await probeThroughputBytesPerSecond(activeTrack);
+    const best = pickQualityForThroughput(activeTrack, measured);
+    if (!best || best.bitrate <= currentAsset.bitrate) return;
+    switchToAsset(best, 'A faster connection was detected - switching to a higher quality stream...');
+  };
+
   const togglePlay = async () => {
     const audio = audioRef.current;
     if (!audio) return;
@@ -141,17 +277,20 @@ export function MusicPlayer({
       return;
     }
     if (!navigator.onLine && audio.currentTime > locallyLoadedThrough(audio, loadedTime)) {
-      setPlayerMessage('You are offline. This position has not been streamed yet.');
+      showError('You are offline. This position has not been streamed yet.');
       return;
     }
+
+    const asset = await ensureStreamReady();
+    if (!asset) return;
 
     try {
       await audio.play();
       setPlaying(true);
-      setPlayerMessage(null);
+      clearNotice();
     } catch {
       setPlaying(false);
-      setPlayerMessage('Playback could not start. Check the network request for the stream endpoint.');
+      showError('Playback could not start. Check the network request for the stream endpoint.');
     }
   };
 
@@ -160,52 +299,34 @@ export function MusicPlayer({
     void seekTo(requestedTime);
   };
 
+  /**
+   * Seeking hands off to the browser's own HTTP-range-based seeking rather
+   * than manually pre-fetching everything from byte 0 up to the target: the
+   * AAC files are faststart-encoded, so the media engine can jump straight to
+   * the target region and only fetch what's actually missing there, the same
+   * way a real player does it. onWaiting/onSeeking already show a buffering
+   * spinner for whatever brief fetch that requires. If the target is already
+   * buffered (e.g. seeking backward), the seek is effectively instant.
+   */
   const seekTo = async (requestedTime: number) => {
     const audio = audioRef.current;
     if (!audio) {
       return;
     }
 
+    const asset = await ensureStreamReady();
+    if (!asset) {
+      return;
+    }
+
     const trackDuration = duration || activeTrack.duration;
-    let loadedThrough = locallyLoadedThrough(audio, loadedTime);
-    const seekRequestId = seekRequestRef.current + 1;
-    seekRequestRef.current = seekRequestId;
-
-    if (navigator.onLine && requestedTime > loadedThrough + 1) {
-      setPreloadingSeek(true);
-      setPlayerMessage('Loading skipped audio...');
-      try {
-        const preloaded = await preloadStreamPrefix(
-          activeTrack,
-          audioSource,
-          networkProfile,
-          requestedTime,
-          trackDuration,
-        );
-        if (seekRequestRef.current !== seekRequestId) {
-          return;
-        }
-        if (preloaded) {
-          loadedThrough = Math.max(loadedThrough, requestedTime);
-          setLoadedTime((current) => Math.max(current, requestedTime));
-          setPlayerMessage(null);
-        }
-      } catch {
-        if (seekRequestRef.current !== seekRequestId) {
-          return;
-        }
-        setPlayerMessage('Could not preload the skipped audio. Streaming from the new position.');
-      } finally {
-        if (seekRequestRef.current === seekRequestId) {
-          setPreloadingSeek(false);
-        }
-      }
-    }
-
+    const loadedThrough = locallyLoadedThrough(audio, loadedTime);
     const nextTime = playableSeekTime(audio, requestedTime, trackDuration, loadedThrough);
+
     if (!navigator.onLine && nextTime < requestedTime) {
-      setPlayerMessage('That part has not been streamed yet. Reconnect to jump further.');
+      showError('That part has not been streamed yet. Reconnect to jump further.');
     }
+
     audio.currentTime = nextTime;
     setCurrentTime(nextTime);
   };
@@ -214,7 +335,7 @@ export function MusicPlayer({
     if (!navigator.onLine && audio.currentTime + 0.5 > locallyLoadedThrough(audio, loadedTime)) {
       audio.pause();
       setPlaying(false);
-      setPlayerMessage('You reached the end of the streamed audio. Reconnect to continue.');
+      showError('You reached the end of the streamed audio. Reconnect to continue.');
       return;
     }
     setCurrentTime(audio.currentTime);
@@ -241,7 +362,19 @@ export function MusicPlayer({
 
   const handlePlayerError = () => {
     setPlaying(false);
-    setPlayerMessage('Streaming failed. The track may still be processing, the connection may be offline, or the S3 object may be unavailable.');
+    showError('Streaming failed. The track may still be processing, the connection may be offline, or the S3 object may be unavailable.');
+  };
+
+  /** Two stalls within 20s means the current rendition is too heavy for this connection - drop a tier. */
+  const handleWaiting = () => {
+    showBuffering('Buffering audio...');
+    const now = Date.now();
+    const recentStalls = [...stallTimestampsRef.current, now].filter((timestamp) => now - timestamp < 20000);
+    stallTimestampsRef.current = recentStalls;
+    if (recentStalls.length >= 2) {
+      stallTimestampsRef.current = [];
+      downgradeQuality();
+    }
   };
 
   const handleEnded = () => {
@@ -273,16 +406,17 @@ export function MusicPlayer({
     <Box className="player-dock">
       <audio
         ref={audioRef}
-        src={audioSource}
-        preload="metadata"
+        preload="none"
         onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || activeTrack.duration)}
         onTimeUpdate={(event) => handleTimeUpdate(event.currentTarget)}
         onProgress={updateBufferedTime}
         onCanPlay={updateBufferedTime}
-        onWaiting={() => setPlayerMessage('Buffering audio...')}
+        onWaiting={handleWaiting}
+        onSeeking={() => showBuffering('Seeking...')}
+        onSeeked={() => clearNotice()}
         onPlaying={() => {
           setPlaying(true);
-          setPlayerMessage(null);
+          clearNotice();
         }}
         onPause={() => setPlaying(false)}
         onError={handlePlayerError}
@@ -309,9 +443,13 @@ export function MusicPlayer({
           <span className="mini-copy">
             <span className="mini-title-row">
               <span className="mini-title">{activeTrack.title}</span>
-              {playerMessage && (
-                <Tooltip title={playerMessage}>
-                  <AlertTriangle size={14} className="mini-alert" />
+              {notice && (
+                <Tooltip title={notice.text}>
+                  {notice.kind === 'buffering' ? (
+                    <Loader2 size={14} className="mini-alert mini-alert-buffering spin" />
+                  ) : (
+                    <AlertTriangle size={14} className="mini-alert mini-alert-error" />
+                  )}
                 </Tooltip>
               )}
             </span>
@@ -333,8 +471,18 @@ export function MusicPlayer({
               <SkipBack size={18} />
             </IconButton>
           </Tooltip>
-          <IconButton className="play-button mini" onClick={togglePlay} aria-label={playing ? 'Pause' : 'Play'}>
-            {playing ? <Pause size={20} /> : <Play size={20} />}
+          <IconButton
+            className="play-button mini"
+            onClick={togglePlay}
+            aria-label={isBuffering ? 'Buffering' : playing ? 'Pause' : 'Play'}
+          >
+            {isBuffering ? (
+              <Loader2 size={20} className="spin" />
+            ) : playing ? (
+              <Pause size={20} />
+            ) : (
+              <Play size={20} />
+            )}
           </IconButton>
           <Tooltip title="Next">
             <IconButton onClick={() => selectRelativeTrack(1)} className="mini-icon-btn">
@@ -526,32 +674,4 @@ function contiguousBufferedEnd(audio: HTMLAudioElement): number {
   }
 
   return end;
-}
-
-function getNetworkProfile(): string {
-  const connection = (
-    navigator as Navigator & {
-      connection?: { effectiveType?: string };
-      mozConnection?: { effectiveType?: string };
-      webkitConnection?: { effectiveType?: string };
-    }
-  ).connection;
-
-  const effectiveType =
-    connection?.effectiveType ??
-    (navigator as Navigator & { mozConnection?: { effectiveType?: string } }).mozConnection
-      ?.effectiveType ??
-    (navigator as Navigator & { webkitConnection?: { effectiveType?: string } }).webkitConnection
-      ?.effectiveType;
-
-  if (
-    effectiveType === 'slow-2g' ||
-    effectiveType === '2g' ||
-    effectiveType === '3g' ||
-    effectiveType === '4g'
-  ) {
-    return effectiveType;
-  }
-
-  return 'unknown';
 }

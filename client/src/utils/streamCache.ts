@@ -1,12 +1,18 @@
-import { Track } from '../types';
+import { streamingUrlForQuality } from '../api/tracks';
+import { AudioAsset, Track } from '../types';
 
-const targetBitrates: Record<string, number> = {
-  'slow-2g': 64000,
-  '2g': 64000,
-  '3g': 128000,
-  '4g': 320000,
-  unknown: 128000,
-};
+/**
+ * `navigator.connection.effectiveType` doesn't reflect Chrome DevTools network
+ * throttling and isn't supported in Safari/Firefox at all, so it can't drive
+ * real adaptive bitrate decisions. Instead we measure actual throughput with a
+ * small ranged fetch against the lowest-bitrate rendition (always cheap and
+ * available) before starting playback, the same way a real player probes the
+ * network it is actually on.
+ */
+const PROBE_BYTES = 128 * 1024;
+const PROBE_TIMEOUT_MS = 4000;
+/** Require this much throughput headroom over a rendition's bitrate before picking it, so playback can stay ahead of realtime without constant rebuffering. */
+const ABR_SAFETY_FACTOR = 1.4;
 
 export function registerStreamCacheWorker(): void {
   if (!('serviceWorker' in navigator)) {
@@ -26,45 +32,75 @@ export function registerStreamCacheWorker(): void {
   });
 }
 
-export async function preloadStreamPrefix(
-  track: Track,
-  streamUrl: string,
-  networkProfile: string,
-  throughTime: number,
-  duration: number,
-): Promise<boolean> {
-  const asset = selectStreamingAsset(track, networkProfile);
-  if (!asset || !asset.sizeBytes || duration <= 0 || throughTime <= 0) {
-    return false;
-  }
-
-  const ratio = Math.min(Math.max(throughTime / duration, 0), 1);
-  const endByte = Math.min(Math.ceil(asset.sizeBytes * ratio) - 1, asset.sizeBytes - 1);
-  if (endByte <= 0) {
-    return false;
-  }
-
-  const response = await fetch(streamUrl, {
-    headers: {
-      Range: `bytes=0-${endByte}`,
-    },
-  });
-
-  if (response.status !== 206 && !response.ok) {
-    return false;
-  }
-
-  await response.arrayBuffer();
-  return true;
+export function sortedReadyAssets(track: Track): AudioAsset[] {
+  return [...track.audioAssets].filter((asset) => asset.status === 'READY').sort((left, right) => left.bitrate - right.bitrate);
 }
 
-function selectStreamingAsset(track: Track, networkProfile: string) {
-  const readyAssets = track.audioAssets.filter((asset) => asset.status === 'READY');
-  if (readyAssets.length === 0) {
+/** Measures real download throughput; returns null if the probe couldn't complete (offline, timeout, error). */
+export async function probeThroughputBytesPerSecond(track: Track): Promise<number | null> {
+  const assets = sortedReadyAssets(track);
+  const lowest = assets[0];
+  if (!lowest) {
     return null;
   }
 
-  const targetBitrate = targetBitrates[networkProfile] ?? targetBitrates.unknown;
-  const sorted = [...readyAssets].sort((left, right) => left.bitrate - right.bitrate);
-  return sorted.find((asset) => asset.bitrate >= targetBitrate) ?? sorted[sorted.length - 1];
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+  const startedAt = performance.now();
+
+  try {
+    const response = await fetch(streamingUrlForQuality(track.id, lowest.quality), {
+      headers: { Range: `bytes=0-${PROBE_BYTES - 1}` },
+      signal: controller.signal,
+    });
+    if (!response.ok && response.status !== 206) {
+      return null;
+    }
+    const buffer = await response.arrayBuffer();
+    const elapsedSeconds = (performance.now() - startedAt) / 1000;
+    if (elapsedSeconds <= 0 || buffer.byteLength === 0) {
+      return null;
+    }
+    return buffer.byteLength / elapsedSeconds;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+/** Picks the highest-bitrate rendition the measured connection can sustain, with a safety margin. */
+export function pickQualityForThroughput(track: Track, bytesPerSecond: number | null): AudioAsset | null {
+  const assets = sortedReadyAssets(track);
+  if (assets.length === 0) {
+    return null;
+  }
+
+  if (bytesPerSecond === null) {
+    // Probe failed rather than measured "slow" - fall back to a conservative middle tier.
+    return assets[Math.min(1, assets.length - 1)];
+  }
+
+  const affordable = assets.filter((asset) => (asset.bitrate / 8) * ABR_SAFETY_FACTOR <= bytesPerSecond);
+  return affordable.length > 0 ? affordable[affordable.length - 1] : assets[0];
+}
+
+/** One tier down from the given asset, or null if it's already the lowest available. */
+export function nextLowerQuality(track: Track, currentAssetId: string): AudioAsset | null {
+  const assets = sortedReadyAssets(track);
+  const index = assets.findIndex((asset) => asset.id === currentAssetId);
+  if (index <= 0) {
+    return null;
+  }
+  return assets[index - 1];
+}
+
+/** One tier up from the given asset, or null if it's already the highest available. */
+export function nextHigherQuality(track: Track, currentAssetId: string): AudioAsset | null {
+  const assets = sortedReadyAssets(track);
+  const index = assets.findIndex((asset) => asset.id === currentAssetId);
+  if (index === -1 || index >= assets.length - 1) {
+    return null;
+  }
+  return assets[index + 1];
 }
