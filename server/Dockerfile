@@ -12,11 +12,12 @@ FROM node:20-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+  && apt-get install -y --no-install-recommends ffmpeg ca-certificates python3 python3-pip \
+  && pip3 install --no-cache-dir --break-system-packages yt-dlp \
   && rm -rf /var/lib/apt/lists/*
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
 RUN mkdir -p temp
-EXPOSE 3000
+EXPOSE 3001
 CMD ["node", "dist/main.js"]

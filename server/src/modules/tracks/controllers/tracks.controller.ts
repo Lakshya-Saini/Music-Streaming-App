@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Headers, Param, Post, Query, Res } from '@nestjs/common';
 import { Response } from 'express';
+import { ImportYoutubeTrackDto } from '../dto/import-youtube-track.dto';
 import { InitiateCoverUploadDto } from '../dto/initiate-cover-upload.dto';
 import { InitiateTrackUploadDto } from '../dto/initiate-track-upload.dto';
 import { ListTracksQueryDto } from '../dto/list-tracks-query.dto';
@@ -15,6 +16,13 @@ export class TracksController {
     @Body() dto: InitiateTrackUploadDto,
   ): Promise<Record<string, unknown>> {
     return this.tracksService.createUploadSession(dto);
+  }
+
+  @Post('youtube-import')
+  async importFromYoutube(
+    @Body() dto: ImportYoutubeTrackDto,
+  ): Promise<Record<string, unknown>> {
+    return this.tracksService.importFromYoutube(dto);
   }
 
   @Post(':id/process')

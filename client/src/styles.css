@@ -1005,6 +1005,67 @@ a {
   font-weight: 780 !important;
 }
 
+.upload-mode-toggle {
+  flex: 0 0 auto;
+}
+
+.upload-mode-toggle .MuiToggleButton-root {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border-color: var(--line) !important;
+  color: var(--muted);
+  text-transform: none;
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+.upload-mode-toggle .MuiToggleButton-root.Mui-selected {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.youtube-dropzone {
+  min-height: 110px;
+  cursor: default;
+}
+
+.youtube-url-field textarea {
+  font-family: inherit;
+}
+
+.youtube-override-note {
+  margin-top: -6px !important;
+}
+
+.youtube-auth-checkbox {
+  margin: 0 !important;
+}
+
+.youtube-auth-checkbox .MuiFormControlLabel-label {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.youtube-row-list {
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.youtube-row .stage-title {
+  overflow-wrap: anywhere;
+}
+
+.youtube-empty-state {
+  padding: 24px 0;
+  text-align: center;
+}
+
+.stage-row.queued .stage-icon {
+  color: var(--muted);
+}
+
 .stage-detail {
   color: var(--muted) !important;
   font-size: 0.86rem !important;

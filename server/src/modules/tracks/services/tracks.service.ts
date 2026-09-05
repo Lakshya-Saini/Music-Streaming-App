@@ -12,6 +12,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { mkdir, rm } from 'node:fs/promises';
 import { extname, join } from 'node:path';
+import { ImportYoutubeTrackDto } from '../dto/import-youtube-track.dto';
 import { InitiateCoverUploadDto } from '../dto/initiate-cover-upload.dto';
 import { InitiateTrackUploadDto } from '../dto/initiate-track-upload.dto';
 import { ListTracksQueryDto } from '../dto/list-tracks-query.dto';
@@ -20,6 +21,7 @@ import { AUDIO_VERSION } from '../constants/audio-renditions';
 import { AudioAssetStatus, ProcessingStage, TrackStatus } from '../constants/track-status';
 import { AudioProcessingService } from './audio-processing.service';
 import { AudioStorageService } from './audio-storage.service';
+import { YoutubeImportService } from './youtube-import.service';
 import { Track, TrackDocument } from '../schemas/track.schema';
 import { AudioAsset, AudioAssetDocument } from '../schemas/audio-asset.schema';
 import { EncodedAudioResult } from '../interfaces/audio-metadata.interface';
@@ -42,6 +44,7 @@ export class TracksService {
     @InjectModel(AudioAsset.name) private readonly audioAssetModel: Model<AudioAssetDocument>,
     private readonly audioProcessing: AudioProcessingService,
     private readonly audioStorage: AudioStorageService,
+    private readonly youtubeImport: YoutubeImportService,
     private readonly config: ConfigService,
   ) {}
 
@@ -226,93 +229,15 @@ export class TracksService {
       );
       this.logger.log(`Downloaded source from S3 for track ${trackId}`);
 
-      const sourceMetadata = await this.runStage(
-        ProcessingStage.PROBE_SOURCE,
+      const { assets, readyTrack } = await this.encodeUploadAndActivate(
         track,
-        () => this.audioProcessing.probeAudio(sourcePath),
+        trackId,
+        tempDir,
+        sourcePath,
+        sourceObjectKey,
+        uploadedOutputKeys,
+        track.sourceUpload.expectedChecksumSha256,
       );
-      this.audioProcessing.validateSourceWav(sourceMetadata);
-      this.logger.log(`ffprobe completed for track ${trackId}`);
-
-      const sourceChecksum = await this.audioProcessing.calculateSha256(sourcePath);
-      if (
-        track.sourceUpload.expectedChecksumSha256 &&
-        track.sourceUpload.expectedChecksumSha256 !== sourceChecksum
-      ) {
-        throw new BadRequestException('Uploaded WAV checksum does not match the expected checksum');
-      }
-
-      await this.trackModel.updateOne(
-        { _id: track._id },
-        {
-          $set: {
-            status: TrackStatus.PROCESSING,
-            durationMs: sourceMetadata.durationMs,
-            source: {
-              ...sourceMetadata,
-              checksumSha256: sourceChecksum,
-              objectKey: sourceObjectKey,
-            },
-          },
-        },
-      );
-
-      const encodedResults: EncodedAudioResult[] = [];
-      for (const rendition of this.audioProcessing.getRenditions()) {
-        const outputPath = join(tempDir, rendition.outputFileName);
-        const stage = `ENCODE_${rendition.label}` as ProcessingStage;
-        encodedResults.push(
-          await this.runStage(stage, track, () =>
-            this.audioProcessing.encodeRendition(sourcePath, outputPath, rendition, trackId),
-          ),
-        );
-      }
-
-      for (const encoded of encodedResults) {
-        const outputKey = this.renditionObjectKey(trackId, encoded.bitrate);
-        await this.runStage(ProcessingStage.UPLOAD_OUTPUT, track, async () => {
-          this.logger.log(`Uploading rendition to S3 for track ${trackId}: ${outputKey}`);
-          await this.audioStorage.uploadFile({
-            filePath: encoded.outputPath,
-            objectKey: outputKey,
-            contentType: 'audio/mp4',
-            cacheControl: 'public, max-age=31536000, immutable',
-            metadata: {
-              checksumsha256: encoded.checksumSha256,
-              bitrate: `${encoded.bitrate}`,
-            },
-          });
-          uploadedOutputKeys.push(outputKey);
-        });
-      }
-
-      const assets = await this.runStage(ProcessingStage.DATABASE, track, async () => {
-        await this.audioAssetModel.deleteMany({
-          trackId: track._id,
-          version: AUDIO_VERSION,
-        });
-        return this.audioAssetModel.insertMany(
-          encodedResults.map((encoded) =>
-            this.toAudioAssetDocument(track._id, trackId, encoded),
-          ),
-          { ordered: true },
-        );
-      });
-
-      /**
-       * S3 and MongoDB are not one transaction. The READY flag is the durable
-       * contract: clients should only treat a track as playable after every
-       * current-version rendition has been uploaded and recorded.
-       */
-      const readyTrack = await this.trackModel.findByIdAndUpdate(
-        track._id,
-        { $set: { status: TrackStatus.READY }, $unset: { processingError: 1 } },
-        { new: true },
-      );
-
-      if (!readyTrack) {
-        throw new InternalServerErrorException('Track disappeared while processing');
-      }
 
       this.logger.log(`Track processing completed for ${trackId}`);
       return this.toTrackResponse(readyTrack, assets);
@@ -326,6 +251,96 @@ export class TracksService {
        */
       await this.cleanupUploadedRenditions(uploadedOutputKeys, trackId);
       this.logger.error(`Track processing failed for ${trackId}`, this.errorMessage(error));
+      throw this.publicError(error);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+      this.logger.log(`Temporary files cleaned up for track ${trackId}`);
+    }
+  }
+
+  async importFromYoutube(dto: ImportYoutubeTrackDto): Promise<Record<string, unknown>> {
+    if (!dto.authorizationConfirmed) {
+      throw new BadRequestException(
+        'You must confirm you are authorized to download and use this video before importing it',
+      );
+    }
+
+    const metadata = await this.runStage(
+      ProcessingStage.FETCH_YOUTUBE_METADATA,
+      undefined,
+      () => this.youtubeImport.fetchMetadata(dto.url),
+    );
+
+    const trackObjectId = new Types.ObjectId();
+    const trackId = trackObjectId.toString();
+    const sourceObjectKey = this.sourceObjectKey(trackId);
+
+    const track = await this.trackModel.create({
+      _id: trackObjectId,
+      title: dto.title || metadata.title || 'Untitled',
+      artist: dto.artist || metadata.uploader || 'Unknown artist',
+      album: dto.album,
+      genre: dto.genre,
+      language: dto.language,
+      releaseYear: dto.releaseYear,
+      status: TrackStatus.PROCESSING,
+      activeAudioVersion: AUDIO_VERSION,
+      importSource: {
+        provider: 'youtube',
+        sourceUrl: dto.url,
+        sourceId: metadata.id || undefined,
+        importedTitle: metadata.title,
+        importedUploader: metadata.uploader,
+      },
+    });
+
+    const tempDir = join(process.cwd(), 'temp', trackId);
+    const sourcePath = join(tempDir, 'source.wav');
+    const uploadedOutputKeys: string[] = [];
+
+    this.logger.log(`YouTube import started for track ${trackId}: ${dto.url}`);
+
+    try {
+      await mkdir(tempDir, { recursive: true });
+
+      const downloadedAudioPath = await this.runStage(
+        ProcessingStage.DOWNLOAD_YOUTUBE_AUDIO,
+        track,
+        () => this.youtubeImport.downloadAudio(dto.url, tempDir),
+      );
+      this.logger.log(`Downloaded YouTube audio for track ${trackId}`);
+
+      await this.runStage(ProcessingStage.TRANSCODE_SOURCE, track, () =>
+        this.audioProcessing.transcodeToWav(downloadedAudioPath, sourcePath),
+      );
+      this.logger.log(`Transcoded YouTube audio to WAV source for track ${trackId}`);
+
+      await this.runStage(ProcessingStage.UPLOAD_SOURCE, track, () =>
+        this.audioStorage.uploadFile({
+          filePath: sourcePath,
+          objectKey: sourceObjectKey,
+          contentType: SOURCE_CONTENT_TYPE,
+        }),
+      );
+
+      const { assets, readyTrack } = await this.encodeUploadAndActivate(
+        track,
+        trackId,
+        tempDir,
+        sourcePath,
+        sourceObjectKey,
+        uploadedOutputKeys,
+      );
+
+      await this.importCoverFromYoutube(trackId, trackObjectId, metadata.thumbnailUrl, tempDir);
+
+      this.logger.log(`YouTube import completed for track ${trackId}`);
+      const finalTrack = await this.trackModel.findById(trackObjectId).exec();
+      return this.toTrackResponse(finalTrack ?? readyTrack, assets);
+    } catch (error) {
+      await this.markFailed(track._id, error);
+      await this.cleanupUploadedRenditions(uploadedOutputKeys, trackId);
+      this.logger.error(`YouTube import failed for track ${trackId}`, this.errorMessage(error));
       throw this.publicError(error);
     } finally {
       await rm(tempDir, { recursive: true, force: true });
@@ -523,25 +538,170 @@ export class TracksService {
 
   private async runStage<T>(
     stage: ProcessingStage,
-    track: TrackDocument,
+    track: TrackDocument | undefined,
     operation: () => Promise<T>,
   ): Promise<T> {
     try {
       return await operation();
     } catch (error) {
+      if (track) {
+        await this.trackModel.updateOne(
+          { _id: track._id },
+          {
+            $set: {
+              status: TrackStatus.FAILED,
+              processingError: {
+                stage,
+                message: this.errorMessage(error),
+              },
+            },
+          },
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Shared tail of both ingestion flows (direct WAV upload and YouTube
+   * import): once a valid local WAV file exists, probing, encoding the four
+   * AAC renditions, uploading them, and flipping the track to READY is
+   * identical regardless of where the source file came from.
+   */
+  private async encodeUploadAndActivate(
+    track: TrackDocument,
+    trackId: string,
+    tempDir: string,
+    sourcePath: string,
+    sourceObjectKey: string,
+    uploadedOutputKeys: string[],
+    expectedChecksumSha256?: string,
+  ): Promise<{ assets: AudioAssetDocument[]; readyTrack: TrackDocument }> {
+    const sourceMetadata = await this.runStage(ProcessingStage.PROBE_SOURCE, track, () =>
+      this.audioProcessing.probeAudio(sourcePath),
+    );
+    this.audioProcessing.validateSourceWav(sourceMetadata);
+    this.logger.log(`ffprobe completed for track ${trackId}`);
+
+    const sourceChecksum = await this.audioProcessing.calculateSha256(sourcePath);
+    if (expectedChecksumSha256 && expectedChecksumSha256 !== sourceChecksum) {
+      throw new BadRequestException('Uploaded WAV checksum does not match the expected checksum');
+    }
+
+    await this.trackModel.updateOne(
+      { _id: track._id },
+      {
+        $set: {
+          status: TrackStatus.PROCESSING,
+          durationMs: sourceMetadata.durationMs,
+          source: {
+            ...sourceMetadata,
+            checksumSha256: sourceChecksum,
+            objectKey: sourceObjectKey,
+          },
+        },
+      },
+    );
+
+    const encodedResults: EncodedAudioResult[] = [];
+    for (const rendition of this.audioProcessing.getRenditions()) {
+      const outputPath = join(tempDir, rendition.outputFileName);
+      const stage = `ENCODE_${rendition.label}` as ProcessingStage;
+      encodedResults.push(
+        await this.runStage(stage, track, () =>
+          this.audioProcessing.encodeRendition(sourcePath, outputPath, rendition, trackId),
+        ),
+      );
+    }
+
+    for (const encoded of encodedResults) {
+      const outputKey = this.renditionObjectKey(trackId, encoded.bitrate);
+      await this.runStage(ProcessingStage.UPLOAD_OUTPUT, track, async () => {
+        this.logger.log(`Uploading rendition to S3 for track ${trackId}: ${outputKey}`);
+        await this.audioStorage.uploadFile({
+          filePath: encoded.outputPath,
+          objectKey: outputKey,
+          contentType: 'audio/mp4',
+          cacheControl: 'public, max-age=31536000, immutable',
+          metadata: {
+            checksumsha256: encoded.checksumSha256,
+            bitrate: `${encoded.bitrate}`,
+          },
+        });
+        uploadedOutputKeys.push(outputKey);
+      });
+    }
+
+    const assets = await this.runStage(ProcessingStage.DATABASE, track, async () => {
+      await this.audioAssetModel.deleteMany({
+        trackId: track._id,
+        version: AUDIO_VERSION,
+      });
+      return this.audioAssetModel.insertMany(
+        encodedResults.map((encoded) => this.toAudioAssetDocument(track._id, trackId, encoded)),
+        { ordered: true },
+      );
+    });
+
+    /**
+     * S3 and MongoDB are not one transaction. The READY flag is the durable
+     * contract: clients should only treat a track as playable after every
+     * current-version rendition has been uploaded and recorded.
+     */
+    const readyTrack = await this.trackModel.findByIdAndUpdate(
+      track._id,
+      { $set: { status: TrackStatus.READY }, $unset: { processingError: 1 } },
+      { new: true },
+    );
+
+    if (!readyTrack) {
+      throw new InternalServerErrorException('Track disappeared while processing');
+    }
+
+    return { assets, readyTrack };
+  }
+
+  /**
+   * Downloads the video's thumbnail and stores it under the same per-track
+   * cover folder used by direct uploads. Failure here never fails the
+   * import: the client already falls back to one of the app's bundled cover
+   * images whenever a track has no coverImage set.
+   */
+  private async importCoverFromYoutube(
+    trackId: string,
+    trackObjectId: Types.ObjectId,
+    thumbnailUrl: string | undefined,
+    tempDir: string,
+  ): Promise<void> {
+    const thumbnail = await this.youtubeImport.downloadThumbnail(thumbnailUrl, join(tempDir, 'thumbnail'));
+    if (!thumbnail) {
+      return;
+    }
+
+    try {
+      const objectKey = this.coverObjectKey(trackId, thumbnail.extension);
+      await this.audioStorage.uploadFile({
+        filePath: thumbnail.path,
+        objectKey,
+        contentType: thumbnail.contentType,
+        cacheControl: 'public, max-age=86400',
+      });
       await this.trackModel.updateOne(
-        { _id: track._id },
+        { _id: trackObjectId },
         {
           $set: {
-            status: TrackStatus.FAILED,
-            processingError: {
-              stage,
-              message: this.errorMessage(error),
+            coverImage: {
+              objectKey,
+              contentType: thumbnail.contentType,
+              sizeBytes: thumbnail.sizeBytes,
             },
           },
         },
       );
-      throw error;
+    } catch (error) {
+      this.logger.warn(
+        `Cover import failed for track ${trackId}, falling back to a default cover: ${this.errorMessage(error)}`,
+      );
     }
   }
 

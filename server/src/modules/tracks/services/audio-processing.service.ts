@@ -164,6 +164,35 @@ export class AudioProcessingService {
     };
   }
 
+  /**
+   * Converts an arbitrary downloaded audio file (e.g. YouTube's bestaudio,
+   * typically Opus/AAC in a WebM or M4A container) into the same PCM WAV
+   * shape the direct-upload flow expects, so both flows can share one
+   * probe/encode/validate pipeline downstream.
+   */
+  async transcodeToWav(inputPath: string, outputPath: string): Promise<void> {
+    const result = await this.runProcess(this.ffmpegPath, [
+      '-y',
+      '-i',
+      inputPath,
+      '-map',
+      '0:a:0',
+      '-vn',
+      '-c:a',
+      'pcm_s16le',
+      '-ar',
+      `${OUTPUT_SAMPLE_RATE}`,
+      '-ac',
+      `${OUTPUT_CHANNELS}`,
+      outputPath,
+    ]);
+
+    if (result.exitCode !== 0) {
+      this.logger.error(`FFmpeg WAV transcode failed: ${result.stderr}`);
+      throw new InternalServerErrorException('Could not convert the downloaded audio into a WAV source file');
+    }
+  }
+
   async calculateSha256(filePath: string): Promise<string> {
     const hash = createHash('sha256');
     return new Promise((resolve, reject) => {

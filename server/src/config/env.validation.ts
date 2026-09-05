@@ -1,7 +1,7 @@
 import * as Joi from 'joi';
 
 export const envValidationSchema = Joi.object({
-  PORT: Joi.number().port().default(3000),
+  PORT: Joi.number().port().default(3001),
   MONGODB_URI: Joi.string().trim().required(),
   AWS_REGION: Joi.string().trim().required(),
   AWS_S3_BUCKET: Joi.string().trim().required(),
@@ -24,6 +24,7 @@ export const envValidationSchema = Joi.object({
   }),
   FFMPEG_PATH: Joi.string().default('ffmpeg'),
   FFPROBE_PATH: Joi.string().default('ffprobe'),
+  YT_DLP_PATH: Joi.string().default('yt-dlp'),
   MAX_UPLOAD_SIZE_MB: Joi.number().integer().min(1).max(20480).default(500),
   CLIENT_ORIGIN: Joi.string().trim().allow('').optional(),
 });

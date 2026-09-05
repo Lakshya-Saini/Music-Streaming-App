@@ -1,5 +1,5 @@
 export default () => ({
-  port: parseInt(process.env.PORT ?? '3000', 10),
+  port: parseInt(process.env.PORT ?? '3001', 10),
   mongodb: {
     uri: process.env.MONGODB_URI?.trim(),
   },
@@ -13,6 +13,9 @@ export default () => ({
   ffmpeg: {
     path: process.env.FFMPEG_PATH ?? 'ffmpeg',
     ffprobePath: process.env.FFPROBE_PATH ?? 'ffprobe',
+  },
+  ytDlp: {
+    path: process.env.YT_DLP_PATH ?? 'yt-dlp',
   },
   upload: {
     maxSizeMb: parseInt(process.env.MAX_UPLOAD_SIZE_MB ?? '500', 10),

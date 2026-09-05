@@ -59,6 +59,24 @@ export class CoverImage {
 }
 
 @Schema({ _id: false })
+export class ImportSource {
+  @Prop({ required: true, enum: ['youtube'] })
+  provider!: 'youtube';
+
+  @Prop({ required: true })
+  sourceUrl!: string;
+
+  @Prop()
+  sourceId?: string;
+
+  @Prop()
+  importedTitle?: string;
+
+  @Prop()
+  importedUploader?: string;
+}
+
+@Schema({ _id: false })
 export class SourceUpload {
   @Prop({ required: true })
   objectKey!: string;
@@ -135,6 +153,9 @@ export class Track {
 
   @Prop({ type: SourceUpload })
   sourceUpload?: SourceUpload;
+
+  @Prop({ type: ImportSource })
+  importSource?: ImportSource;
 
   @Prop({ type: CoverImage })
   coverImage?: CoverImage;

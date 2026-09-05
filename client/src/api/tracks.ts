@@ -24,6 +24,25 @@ interface UploadSessionResponse {
   };
 }
 
+export interface YoutubeImportRequest {
+  url: string;
+  authorizationConfirmed: boolean;
+  title?: string;
+  artist?: string;
+  album?: string;
+  genre?: string;
+  language?: string;
+  releaseYear?: number;
+}
+
+export interface YoutubeImportResult {
+  id: string;
+  title: string;
+  artist: string;
+  status: string;
+  coverUrl?: string;
+}
+
 interface CoverUploadSessionRequest {
   fileName: string;
   contentType: string;
@@ -173,6 +192,24 @@ export async function processUploadedTrack(trackId: string): Promise<unknown> {
   }
 
   return response.json() as Promise<unknown>;
+}
+
+export async function importYoutubeTrack(
+  payload: YoutubeImportRequest,
+): Promise<YoutubeImportResult> {
+  const response = await fetch(`${API_BASE_URL}/tracks/youtube-import`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+
+  return response.json() as Promise<YoutubeImportResult>;
 }
 
 export async function createCoverUploadSession(
