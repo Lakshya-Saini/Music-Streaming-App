@@ -5,6 +5,7 @@ interface UploadSessionRequest {
   artist: string;
   album?: string;
   genre?: string;
+  language?: string;
   releaseYear?: number;
   trackNumber?: number;
   fileName: string;
@@ -21,6 +22,21 @@ interface UploadSessionResponse {
     url: string;
     headers: Record<string, string>;
   };
+}
+
+interface CoverUploadSessionRequest {
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+}
+
+interface CoverUploadSessionResponse {
+  upload: {
+    method: 'PUT';
+    url: string;
+    headers: Record<string, string>;
+  };
+  coverUrl: string;
 }
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? '/api/v1';
@@ -42,10 +58,13 @@ interface ApiTrack {
   artist: string;
   album?: string;
   genre?: string;
+  language?: string;
   releaseYear?: number;
   durationMs?: number;
   audioAssets?: ApiAudioAsset[];
   streamUrl?: string;
+  coverUrl?: string;
+  createdAt?: string;
 }
 
 interface ListTracksResponse {
@@ -156,6 +175,25 @@ export async function processUploadedTrack(trackId: string): Promise<unknown> {
   return response.json() as Promise<unknown>;
 }
 
+export async function createCoverUploadSession(
+  trackId: string,
+  payload: CoverUploadSessionRequest,
+): Promise<CoverUploadSessionResponse> {
+  const response = await fetch(`${API_BASE_URL}/tracks/${trackId}/cover-upload-session`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+
+  return response.json() as Promise<CoverUploadSessionResponse>;
+}
+
 function mapApiTrack(track: ApiTrack, index: number): Track {
   const assets = track.audioAssets ?? [];
   const bestAsset = [...assets].sort((left, right) => right.bitrate - left.bitrate)[0];
@@ -166,12 +204,15 @@ function mapApiTrack(track: ApiTrack, index: number): Track {
     artist: track.artist,
     album: track.album ?? 'Single',
     genre: track.genre ?? 'Music',
+    language: track.language,
     year: track.releaseYear ?? new Date().getFullYear(),
     duration: Math.round((track.durationMs ?? 0) / 1000),
     bitrate: bestAsset ? Math.round(bestAsset.bitrate / 1000) : 0,
-    cover: covers[index % covers.length],
+    cover: track.coverUrl ?? covers[index % covers.length],
+    hasCustomCover: Boolean(track.coverUrl),
     color: colors[index % colors.length],
     streamUrl: streamingUrlFor(track.id, 'unknown'),
+    createdAt: track.createdAt,
     audioAssets: assets,
   };
 }

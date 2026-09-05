@@ -1,5 +1,6 @@
 import { Body, Controller, Get, Headers, Param, Post, Query, Res } from '@nestjs/common';
 import { Response } from 'express';
+import { InitiateCoverUploadDto } from '../dto/initiate-cover-upload.dto';
 import { InitiateTrackUploadDto } from '../dto/initiate-track-upload.dto';
 import { ListTracksQueryDto } from '../dto/list-tracks-query.dto';
 import { StreamTrackQueryDto } from '../dto/stream-track-query.dto';
@@ -19,6 +20,23 @@ export class TracksController {
   @Post(':id/process')
   async processUploadedTrack(@Param('id') id: string): Promise<Record<string, unknown>> {
     return this.tracksService.processUploadedTrack(id);
+  }
+
+  @Post(':id/cover-upload-session')
+  async createCoverUploadSession(
+    @Param('id') id: string,
+    @Body() dto: InitiateCoverUploadDto,
+  ): Promise<Record<string, unknown>> {
+    return this.tracksService.createCoverUploadSession(id, dto);
+  }
+
+  @Get(':id/cover')
+  async getCover(@Param('id') id: string, @Res() response: Response): Promise<void> {
+    const cover = await this.tracksService.getCoverStream(id);
+    for (const [header, value] of Object.entries(cover.headers)) {
+      response.setHeader(header, value);
+    }
+    cover.body.pipe(response);
   }
 
   @Get()

@@ -12,6 +12,7 @@ import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
 import { mkdir, rm } from 'node:fs/promises';
 import { extname, join } from 'node:path';
+import { InitiateCoverUploadDto } from '../dto/initiate-cover-upload.dto';
 import { InitiateTrackUploadDto } from '../dto/initiate-track-upload.dto';
 import { ListTracksQueryDto } from '../dto/list-tracks-query.dto';
 import { NetworkProfile, StreamTrackQueryDto, StreamQuality } from '../dto/stream-track-query.dto';
@@ -26,6 +27,11 @@ import { Readable } from 'node:stream';
 
 const PRESIGNED_UPLOAD_EXPIRES_SECONDS = 15 * 60;
 const SOURCE_CONTENT_TYPE = 'audio/wav';
+const ACCEPTED_COVER_MIME_TYPES: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+};
 
 @Injectable()
 export class TracksService {
@@ -95,6 +101,87 @@ export class TracksService {
       next: {
         method: 'POST',
         path: `/api/v1/tracks/${trackId}/process`,
+      },
+    };
+  }
+
+  async createCoverUploadSession(
+    id: string,
+    dto: InitiateCoverUploadDto,
+  ): Promise<Record<string, unknown>> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('Invalid track id');
+    }
+
+    const track = await this.trackModel.findById(id).exec();
+    if (!track) {
+      throw new NotFoundException('Track not found');
+    }
+
+    const extension = ACCEPTED_COVER_MIME_TYPES[dto.contentType];
+    if (!extension) {
+      throw new BadRequestException('Only JPEG, PNG, or WEBP cover images are supported');
+    }
+
+    const objectKey = this.coverObjectKey(id, extension);
+
+    const uploadUrl = await this.audioStorage.createPresignedUploadUrl({
+      objectKey,
+      contentType: dto.contentType,
+      expiresInSeconds: PRESIGNED_UPLOAD_EXPIRES_SECONDS,
+    });
+
+    await this.trackModel.updateOne(
+      { _id: track._id },
+      {
+        $set: {
+          coverImage: {
+            objectKey,
+            contentType: dto.contentType,
+            sizeBytes: dto.sizeBytes,
+          },
+        },
+      },
+    );
+
+    this.logger.log(`Created direct S3 cover upload session for track ${id}`);
+
+    return {
+      upload: {
+        method: 'PUT',
+        url: uploadUrl,
+        objectKey,
+        headers: {
+          'Content-Type': dto.contentType,
+        },
+      },
+      coverUrl: this.coverPath(id),
+    };
+  }
+
+  async getCoverStream(id: string): Promise<{
+    body: Readable;
+    headers: Record<string, string | number>;
+  }> {
+    if (!Types.ObjectId.isValid(id)) {
+      throw new BadRequestException('Invalid track id');
+    }
+
+    const track = await this.trackModel.findById(id).exec();
+    if (!track?.coverImage) {
+      throw new NotFoundException('Track does not have a cover image');
+    }
+
+    const objectStream = await this.audioStorage.getObjectStream(track.coverImage.objectKey);
+
+    return {
+      body: objectStream.body,
+      headers: {
+        'Content-Type': objectStream.contentType ?? track.coverImage.contentType,
+        'Cache-Control': 'public, max-age=86400',
+        ...(objectStream.contentLength !== undefined
+          ? { 'Content-Length': objectStream.contentLength }
+          : {}),
       },
     };
   }
@@ -306,6 +393,7 @@ export class TracksService {
             status: asset.status,
           })),
           streamUrl: this.streamPath(id),
+          coverUrl: track.coverImage ? this.coverPath(id) : undefined,
         };
       }),
       pagination: {
@@ -490,8 +578,16 @@ export class TracksService {
     return `music/tracks/${trackId}/audio/v${AUDIO_VERSION}/aac-${bitrate / 1000}.m4a`;
   }
 
+  private coverObjectKey(trackId: string, extension: string): string {
+    return `music/tracks/${trackId}/cover/cover.${extension}`;
+  }
+
   private streamPath(trackId: string): string {
     return `/api/v1/tracks/${trackId}/stream?quality=auto`;
+  }
+
+  private coverPath(trackId: string): string {
+    return `/api/v1/tracks/${trackId}/cover`;
   }
 
   private findAssets(trackId: Types.ObjectId): Promise<AudioAssetDocument[]> {
@@ -586,6 +682,7 @@ export class TracksService {
       activeAudioVersion: raw.activeAudioVersion,
       sourceUpload: raw.sourceUpload,
       source: raw.source,
+      coverUrl: raw.coverImage ? this.coverPath(raw._id.toString()) : undefined,
       processingError: raw.processingError,
       audioAssets: assets.map((asset) => {
         const assetRaw = asset.toObject();

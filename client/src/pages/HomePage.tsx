@@ -1,73 +1,89 @@
-import { Box, Button, Typography } from '@mui/material';
-import { RefreshCw } from 'lucide-react';
-import { useEffect, useState } from 'react';
-import type { AppMode } from '../App';
-import { listReadyTracks } from '../api/tracks';
-import { AppHeader } from '../components/AppHeader';
-import { MusicPlayer } from '../components/MusicPlayer';
-import { TrackList } from '../components/TrackList';
+import { Box, Typography } from '@mui/material';
+import { useMemo } from 'react';
+import { CategoryRow } from '../components/CategoryRow';
+import { RecentBanner } from '../components/RecentBanner';
+import { useLibrary } from '../state/LibraryContext';
 import { Track } from '../types';
+import { languageLabel } from '../utils/languages';
 
-interface HomePageProps {
-  mode: AppMode;
-  onToggleMode: () => void;
+const MAX_PER_CATEGORY = 20;
+
+interface Category {
+  key: string;
+  title: string;
+  tracks: Track[];
 }
 
-export function HomePage({ mode, onToggleMode }: HomePageProps) {
-  const [tracks, setTracks] = useState<Track[]>([]);
-  const [activeTrack, setActiveTrack] = useState<Track | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+function buildCategories(tracks: Track[]): Category[] {
+  if (tracks.length === 0) {
+    return [];
+  }
 
-  const loadTracks = async () => {
-    setLoading(true);
-    setErrorMessage(null);
-    try {
-      const readyTracks = await listReadyTracks();
-      setTracks(readyTracks);
-      setActiveTrack((current) => {
-        if (current && readyTracks.some((track) => track.id === current.id)) {
-          return current;
-        }
-        return readyTracks[0] ?? null;
-      });
-    } catch (error) {
-      setErrorMessage(error instanceof Error ? error.message : 'Could not load songs');
-    } finally {
-      setLoading(false);
+  const categories: Category[] = [
+    { key: 'trending', title: 'Trending Songs', tracks: tracks.slice(0, MAX_PER_CATEGORY) },
+  ];
+
+  const byLanguage = new Map<string, Track[]>();
+  const byGenre = new Map<string, Track[]>();
+
+  for (const track of tracks) {
+    if (track.language) {
+      const label = languageLabel(track.language);
+      byLanguage.set(label, [...(byLanguage.get(label) ?? []), track]);
     }
-  };
+    if (track.genre) {
+      byGenre.set(track.genre, [...(byGenre.get(track.genre) ?? []), track]);
+    }
+  }
 
-  useEffect(() => {
-    void loadTracks();
-  }, []);
+  for (const [label, items] of byLanguage) {
+    categories.push({ key: `lang-${label}`, title: `${label} Songs`, tracks: items.slice(0, MAX_PER_CATEGORY) });
+  }
+
+  for (const [genre, items] of byGenre) {
+    categories.push({ key: `genre-${genre}`, title: `${genre} Songs`, tracks: items.slice(0, MAX_PER_CATEGORY) });
+  }
+
+  return categories;
+}
+
+export function HomePage() {
+  const { tracks, loading, errorMessage, activeTrack, playTrack } = useLibrary();
+  const categories = useMemo(() => buildCategories(tracks), [tracks]);
+  const mostRecent = tracks[0];
 
   return (
-    <Box className="app-page">
-      <AppHeader mode={mode} onToggleMode={onToggleMode} />
-      <Box component="main" className="home-layout">
-        <TrackList
-          tracks={tracks}
-          activeTrackId={activeTrack?.id}
-          onSelectTrack={setActiveTrack}
-          loading={loading}
-        />
-        {activeTrack ? (
-          <MusicPlayer tracks={tracks} activeTrack={activeTrack} onTrackChange={setActiveTrack} />
-        ) : (
-          <Box className="player-shell empty-player">
-            <Typography component="h2" className="section-title">
-              No playable songs yet
-            </Typography>
-            <Typography className="section-subtitle">
-              Upload a WAV file, wait for processing to finish, then refresh the library.
-            </Typography>
-            {errorMessage && <Typography className="upload-error">{errorMessage}</Typography>}
-            <Button variant="contained" startIcon={<RefreshCw size={18} />} onClick={loadTracks}>
-              Refresh library
-            </Button>
-          </Box>
-        )}
+    <Box className="page home-page">
+      {loading && tracks.length === 0 && (
+        <Typography className="section-subtitle">Loading songs from your catalog...</Typography>
+      )}
+
+      {!loading && errorMessage && tracks.length === 0 && (
+        <Box className="empty-state">
+          <Typography className="empty-title">Could not load songs</Typography>
+          <Typography className="section-subtitle">{errorMessage}</Typography>
+        </Box>
+      )}
+
+      {!loading && !errorMessage && tracks.length === 0 && (
+        <Box className="empty-state">
+          <Typography className="empty-title">No songs yet</Typography>
+          <Typography className="section-subtitle">Upload your first track to build your library.</Typography>
+        </Box>
+      )}
+
+      {mostRecent && <RecentBanner track={mostRecent} onPlay={playTrack} />}
+
+      <Box className="category-stack">
+        {categories.map((category) => (
+          <CategoryRow
+            key={category.key}
+            title={category.title}
+            tracks={category.tracks}
+            activeTrackId={activeTrack?.id}
+            onSelectTrack={playTrack}
+          />
+        ))}
       </Box>
     </Box>
   );

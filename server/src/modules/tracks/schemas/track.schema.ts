@@ -47,6 +47,18 @@ export class ProcessingError {
 }
 
 @Schema({ _id: false })
+export class CoverImage {
+  @Prop({ required: true })
+  objectKey!: string;
+
+  @Prop({ required: true })
+  contentType!: string;
+
+  @Prop({ required: true })
+  sizeBytes!: number;
+}
+
+@Schema({ _id: false })
 export class SourceUpload {
   @Prop({ required: true })
   objectKey!: string;
@@ -124,6 +136,9 @@ export class Track {
   @Prop({ type: SourceUpload })
   sourceUpload?: SourceUpload;
 
+  @Prop({ type: CoverImage })
+  coverImage?: CoverImage;
+
   @Prop({ type: ProcessingError })
   processingError?: ProcessingError;
 
@@ -133,4 +148,13 @@ export class Track {
 
 export const TrackSchema = SchemaFactory.createForClass(Track);
 
-TrackSchema.index({ title: 'text', artist: 'text', album: 'text', genre: 'text' });
+/**
+ * `language_override` is required here: MongoDB's text index otherwise reads
+ * each document's own `language` field to pick a stemming language, and our
+ * `language` field holds track metadata (e.g. "hi", "pa") rather than one of
+ * Mongo's supported text-search language names, which would reject inserts.
+ */
+TrackSchema.index(
+  { title: 'text', artist: 'text', album: 'text', genre: 'text' },
+  { language_override: 'textIndexLanguage' },
+);

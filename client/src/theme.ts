@@ -6,39 +6,39 @@ export const createAppTheme = (mode: AppMode) =>
     palette: {
       mode,
       primary: {
-        main: mode === 'dark' ? '#ff375f' : '#fa233b',
+        main: mode === 'dark' ? '#6d8bff' : '#3452e1',
       },
       secondary: {
-        main: mode === 'dark' ? '#ff9f0a' : '#ff7a00',
+        main: mode === 'dark' ? '#3fc7ac' : '#1a9c84',
       },
       background: {
-        default: mode === 'dark' ? '#050506' : '#f5f5f7',
-        paper: mode === 'dark' ? '#151517' : '#ffffff',
+        default: mode === 'dark' ? '#0e1015' : '#f6f7fb',
+        paper: mode === 'dark' ? '#161922' : '#ffffff',
       },
       text: {
-        primary: mode === 'dark' ? '#f5f5f7' : '#1d1d1f',
-        secondary: mode === 'dark' ? '#a1a1a6' : '#6e6e73',
+        primary: mode === 'dark' ? '#eef0f6' : '#161a23',
+        secondary: mode === 'dark' ? '#98a0b3' : '#5c6478',
       },
     },
     shape: {
-      borderRadius: 8,
+      borderRadius: 10,
     },
     typography: {
       fontFamily:
         'Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-      h1: { fontWeight: 800, letterSpacing: 0 },
-      h2: { fontWeight: 760, letterSpacing: 0 },
-      h3: { fontWeight: 740, letterSpacing: 0 },
-      h4: { fontWeight: 720, letterSpacing: 0 },
-      h5: { fontWeight: 700, letterSpacing: 0 },
-      h6: { fontWeight: 700, letterSpacing: 0 },
-      button: { fontWeight: 700, textTransform: 'none', letterSpacing: 0 },
+      h1: { fontWeight: 750, letterSpacing: -0.2 },
+      h2: { fontWeight: 720, letterSpacing: -0.2 },
+      h3: { fontWeight: 700, letterSpacing: -0.1 },
+      h4: { fontWeight: 680, letterSpacing: 0 },
+      h5: { fontWeight: 650, letterSpacing: 0 },
+      h6: { fontWeight: 650, letterSpacing: 0 },
+      button: { fontWeight: 650, textTransform: 'none', letterSpacing: 0 },
     },
     components: {
       MuiButton: {
         styleOverrides: {
           root: {
-            borderRadius: 8,
+            borderRadius: 10,
           },
         },
       },

@@ -1,8 +1,12 @@
 import { CssBaseline, ThemeProvider } from '@mui/material';
 import { useEffect, useMemo, useState } from 'react';
 import { Route, Routes } from 'react-router-dom';
+import { AppShell } from './components/layout/AppShell';
+import { BrowsePage } from './pages/BrowsePage';
 import { HomePage } from './pages/HomePage';
+import { PlaylistsPage } from './pages/PlaylistsPage';
 import { UploadPage } from './pages/UploadPage';
+import { LibraryProvider } from './state/LibraryContext';
 import { createAppTheme } from './theme';
 
 export type AppMode = 'light' | 'dark';
@@ -25,10 +29,16 @@ export function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
-      <Routes>
-        <Route path="/" element={<HomePage mode={mode} onToggleMode={toggleMode} />} />
-        <Route path="/upload" element={<UploadPage mode={mode} onToggleMode={toggleMode} />} />
-      </Routes>
+      <LibraryProvider>
+        <Routes>
+          <Route element={<AppShell mode={mode} onToggleMode={toggleMode} />}>
+            <Route path="/" element={<HomePage />} />
+            <Route path="/browse" element={<BrowsePage />} />
+            <Route path="/playlists" element={<PlaylistsPage />} />
+            <Route path="/upload" element={<UploadPage />} />
+          </Route>
+        </Routes>
+      </LibraryProvider>
     </ThemeProvider>
   );
 }

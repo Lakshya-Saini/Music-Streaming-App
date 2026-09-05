@@ -12,17 +12,6 @@ interface TrackListProps {
 export function TrackList({ tracks, activeTrackId, onSelectTrack, loading = false }: TrackListProps) {
   return (
     <Box className="track-list-shell">
-      <Box className="section-heading-row">
-        <Box>
-          <Typography component="h2" className="section-title">
-            Library
-          </Typography>
-          <Typography className="section-subtitle">
-            {loading ? 'Loading songs from S3-backed catalog' : `${tracks.length} songs available`}
-          </Typography>
-        </Box>
-      </Box>
-
       <Box className="track-list">
         {tracks.map((track) => {
           const active = track.id === activeTrackId;
@@ -41,8 +30,8 @@ export function TrackList({ tracks, activeTrackId, onSelectTrack, loading = fals
                 </span>
               </span>
               <span className="track-side">
+                <span className="track-genre-chip">{track.genre}</span>
                 <span>{formatDuration(track.duration)}</span>
-                <span>{track.bitrate}k</span>
               </span>
             </button>
           );
@@ -50,8 +39,10 @@ export function TrackList({ tracks, activeTrackId, onSelectTrack, loading = fals
 
         {tracks.length === 0 && (
           <Box className="empty-state">
-            <Typography className="empty-title">No songs ready</Typography>
-            <Typography className="section-subtitle">Completed uploads will appear here.</Typography>
+            <Typography className="empty-title">{loading ? 'Loading songs...' : 'No songs found'}</Typography>
+            <Typography className="section-subtitle">
+              {loading ? 'Fetching your catalog.' : 'Try a different filter or upload a new track.'}
+            </Typography>
           </Box>
         )}
       </Box>

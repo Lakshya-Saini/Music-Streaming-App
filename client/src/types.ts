@@ -4,12 +4,15 @@ export interface Track {
   artist: string;
   album: string;
   genre: string;
+  language?: string;
   year: number;
   duration: number;
   bitrate: number;
   cover: string;
+  hasCustomCover: boolean;
   color: string;
   streamUrl: string;
+  createdAt?: string;
   audioAssets: AudioAsset[];
 }
 

@@ -1,8 +1,8 @@
-import { Box, IconButton, Slider, Tooltip, Typography } from '@mui/material';
+import { Box, IconButton, Menu, MenuItem, Slider, Tooltip } from '@mui/material';
 import {
   AlertTriangle,
+  ChevronDown,
   ListMusic,
-  Maximize2,
   Pause,
   Play,
   Repeat,
@@ -23,13 +23,24 @@ interface MusicPlayerProps {
   tracks: Track[];
   activeTrack: Track;
   onTrackChange: (track: Track) => void;
+  queueOpen: boolean;
+  onToggleQueue: () => void;
 }
 
 type RepeatMode = 'off' | 'one' | 'all';
 
-export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerProps) {
+const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+
+export function MusicPlayer({
+  tracks,
+  activeTrack,
+  onTrackChange,
+  queueOpen,
+  onToggleQueue,
+}: MusicPlayerProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const seekRequestRef = useRef(0);
+  const [speedAnchor, setSpeedAnchor] = useState<HTMLElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [loadedTime, setLoadedTime] = useState(0);
@@ -39,7 +50,6 @@ export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerP
   const [shuffle, setShuffle] = useState(false);
   const [repeat, setRepeat] = useState<RepeatMode>('all');
   const [speed, setSpeed] = useState(1);
-  const [online, setOnline] = useState(navigator.onLine);
   const [preloadingSeek, setPreloadingSeek] = useState(false);
   const [playerMessage, setPlayerMessage] = useState<string | null>(null);
 
@@ -68,11 +78,9 @@ export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerP
 
   useEffect(() => {
     const handleOnline = () => {
-      setOnline(true);
       setPlayerMessage(null);
     };
     const handleOffline = () => {
-      setOnline(false);
       setPlayerMessage('You are offline. Already streamed audio remains playable.');
     };
 
@@ -133,7 +141,6 @@ export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerP
       return;
     }
     if (!navigator.onLine && audio.currentTime > locallyLoadedThrough(audio, loadedTime)) {
-      setOnline(false);
       setPlayerMessage('You are offline. This position has not been streamed yet.');
       return;
     }
@@ -206,7 +213,6 @@ export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerP
   const handleTimeUpdate = (audio: HTMLAudioElement) => {
     if (!navigator.onLine && audio.currentTime + 0.5 > locallyLoadedThrough(audio, loadedTime)) {
       audio.pause();
-      setOnline(false);
       setPlaying(false);
       setPlayerMessage('You reached the end of the streamed audio. Reconnect to continue.');
       return;
@@ -255,8 +261,16 @@ export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerP
     setRepeat((current) => (current === 'off' ? 'all' : current === 'all' ? 'one' : 'off'));
   };
 
+  const selectSpeed = (option: number) => {
+    setSpeed(option);
+    setSpeedAnchor(null);
+  };
+
+  const clampedTime = Math.min(currentTime, duration || activeTrack.duration);
+  const speedOpen = Boolean(speedAnchor);
+
   return (
-    <Box className="player-shell">
+    <Box className="player-dock">
       <audio
         ref={audioRef}
         src={audioSource}
@@ -275,82 +289,167 @@ export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerP
         onEnded={handleEnded}
       />
 
-      <Box className="now-playing">
-        <Box className="cover-wrap" style={{ backgroundColor: activeTrack.color }}>
-          <img src={activeTrack.cover} alt="" className="cover-art" />
+      <Box className="mini-seek">
+        <Box className="buffer-track">
+          <span style={{ width: `${loadedPercent}%` }} />
         </Box>
-        <Box className="now-copy">
-          <Typography component="h2">{activeTrack.title}</Typography>
-          <Typography>{activeTrack.artist}</Typography>
-          <Box className="metadata-line">
-            <span>{activeTrack.album}</span>
-            <span>{activeTrack.genre}</span>
-            <span>{activeTrack.year}</span>
-            <span>{networkProfile.toUpperCase()} auto</span>
-            <span>{online ? 'Online' : 'Offline'}</span>
+        <Slider
+          value={clampedTime}
+          min={0}
+          max={duration || activeTrack.duration}
+          onChange={seek}
+          aria-label="Playback progress"
+          className="mini-seek-slider"
+        />
+      </Box>
+
+      <Box className="mini-player">
+        <Box className="mini-now-playing">
+          <img src={activeTrack.cover} alt="" className="mini-cover" />
+          <span className="mini-copy">
+            <span className="mini-title-row">
+              <span className="mini-title">{activeTrack.title}</span>
+              {playerMessage && (
+                <Tooltip title={playerMessage}>
+                  <AlertTriangle size={14} className="mini-alert" />
+                </Tooltip>
+              )}
+            </span>
+            <span className="mini-artist">{activeTrack.artist}</span>
+          </span>
+        </Box>
+
+        <Box className="mini-transport">
+          <Tooltip title="Shuffle">
+            <IconButton
+              onClick={() => setShuffle((value) => !value)}
+              className={`mini-icon-btn mini-icon-extra${shuffle ? ' control-on' : ''}`}
+            >
+              <Shuffle size={16} />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title="Previous">
+            <IconButton onClick={() => selectRelativeTrack(-1)} className="mini-icon-btn">
+              <SkipBack size={18} />
+            </IconButton>
+          </Tooltip>
+          <IconButton className="play-button mini" onClick={togglePlay} aria-label={playing ? 'Pause' : 'Play'}>
+            {playing ? <Pause size={20} /> : <Play size={20} />}
+          </IconButton>
+          <Tooltip title="Next">
+            <IconButton onClick={() => selectRelativeTrack(1)} className="mini-icon-btn">
+              <SkipForward size={18} />
+            </IconButton>
+          </Tooltip>
+          <Tooltip title={`Repeat ${repeat}`}>
+            <IconButton
+              onClick={toggleRepeat}
+              className={`mini-icon-btn mini-icon-extra${repeat !== 'off' ? ' control-on' : ''}`}
+            >
+              <Repeat size={16} />
+            </IconButton>
+          </Tooltip>
+        </Box>
+
+        <Box className="mini-progress">
+          <span className="mini-progress-time">{formatDuration(clampedTime)}</span>
+          <Box className="mini-progress-track">
+            <Box className="buffer-track">
+              <span style={{ width: `${loadedPercent}%` }} />
+            </Box>
+            <Slider
+              value={clampedTime}
+              min={0}
+              max={duration || activeTrack.duration}
+              onChange={seek}
+              aria-label="Playback progress"
+              className="mini-progress-slider"
+            />
           </Box>
+          <span className="mini-progress-time">{formatDuration(duration || activeTrack.duration)}</span>
+        </Box>
+
+        <Box className="mini-right">
+          <Tooltip title="Playback speed">
+            <button
+              type="button"
+              className={`mini-speed-btn mini-icon-extra${speedOpen ? ' open' : ''}`}
+              onClick={(event) => setSpeedAnchor(event.currentTarget)}
+            >
+              {speed}x
+              <ChevronDown size={12} />
+            </button>
+          </Tooltip>
+
+          <Box className="mini-volume">
+            <IconButton
+              onClick={() => setMuted((value) => !value)}
+              className="mini-icon-btn"
+              aria-label={muted ? 'Unmute' : 'Mute'}
+            >
+              {muted ? <VolumeX size={16} /> : volume > 0.5 ? <Volume2 size={16} /> : <Volume1 size={16} />}
+            </IconButton>
+            <Slider
+              value={muted ? 0 : volume}
+              min={0}
+              max={1}
+              step={0.01}
+              onChange={(_event, value) => {
+                setMuted(false);
+                setVolume(Array.isArray(value) ? value[0] : value);
+              }}
+              aria-label="Volume"
+              className="mini-volume-slider"
+            />
+          </Box>
+
+          <Tooltip title={queueOpen ? 'Hide queue' : 'Up next'}>
+            <IconButton
+              onClick={onToggleQueue}
+              aria-label="Toggle queue"
+              className={`mini-icon-btn mini-icon-extra${queueOpen ? ' control-on' : ''}`}
+            >
+              <ListMusic size={18} />
+            </IconButton>
+          </Tooltip>
         </Box>
       </Box>
 
-      {playerMessage && (
-        <Box className="player-message">
-          <AlertTriangle size={18} />
-          <span>{playerMessage}</span>
-        </Box>
-      )}
-
-      <Box className="timeline-block">
-        <Box className="stream-meter">
-          <Box className="buffer-track">
-            <span style={{ width: `${loadedPercent}%` }} />
-          </Box>
-          <Slider
-            value={Math.min(currentTime, duration || activeTrack.duration)}
-            min={0}
-            max={duration || activeTrack.duration}
-            onChange={seek}
-            aria-label="Playback progress"
-          />
-        </Box>
-        <Box className="time-row">
-          <span>{formatDuration(currentTime)}</span>
-          <span>{preloadingSeek ? 'Loading seek...' : `Loaded ${Math.round(loadedPercent)}%`}</span>
-          <span>{formatDuration(duration || activeTrack.duration)}</span>
-        </Box>
-      </Box>
-
-      <Box className="transport-row">
+      <Box className="mini-secondary">
         <Tooltip title="Shuffle">
-          <IconButton className={shuffle ? 'control-on' : ''} onClick={() => setShuffle((value) => !value)}>
-            <Shuffle size={20} />
-          </IconButton>
-        </Tooltip>
-        <Tooltip title="Previous">
-          <IconButton onClick={() => selectRelativeTrack(-1)}>
-            <SkipBack size={22} />
-          </IconButton>
-        </Tooltip>
-        <IconButton className="play-button" onClick={togglePlay} aria-label={playing ? 'Pause' : 'Play'}>
-          {playing ? <Pause size={28} /> : <Play size={28} />}
-        </IconButton>
-        <Tooltip title="Next">
-          <IconButton onClick={() => selectRelativeTrack(1)}>
-            <SkipForward size={22} />
+          <IconButton
+            onClick={() => setShuffle((value) => !value)}
+            className={`mini-icon-btn${shuffle ? ' control-on' : ''}`}
+          >
+            <Shuffle size={16} />
           </IconButton>
         </Tooltip>
         <Tooltip title={`Repeat ${repeat}`}>
-          <IconButton className={repeat !== 'off' ? 'control-on' : ''} onClick={toggleRepeat}>
-            <Repeat size={20} />
+          <IconButton
+            onClick={toggleRepeat}
+            className={`mini-icon-btn${repeat !== 'off' ? ' control-on' : ''}`}
+          >
+            <Repeat size={16} />
           </IconButton>
         </Tooltip>
-      </Box>
-
-      <Box className="utility-grid">
-        <Box className="utility-panel">
-          <Box className="mini-label">
-            {muted ? <VolumeX size={18} /> : volume > 0.5 ? <Volume2 size={18} /> : <Volume1 size={18} />}
-            <span>Volume</span>
-          </Box>
+        <Tooltip title="Playback speed">
+          <button
+            type="button"
+            className={`mini-speed-btn${speedOpen ? ' open' : ''}`}
+            onClick={(event) => setSpeedAnchor(event.currentTarget)}
+          >
+            {speed}x
+            <ChevronDown size={12} />
+          </button>
+        </Tooltip>
+        <Box className="mini-secondary-volume">
+          <IconButton
+            onClick={() => setMuted((value) => !value)}
+            className="mini-icon-btn"
+            aria-label={muted ? 'Unmute' : 'Mute'}
+          >
+            {muted ? <VolumeX size={16} /> : volume > 0.5 ? <Volume2 size={16} /> : <Volume1 size={16} />}
+          </IconButton>
           <Slider
             value={muted ? 0 : volume}
             min={0}
@@ -361,49 +460,34 @@ export function MusicPlayer({ tracks, activeTrack, onTrackChange }: MusicPlayerP
               setVolume(Array.isArray(value) ? value[0] : value);
             }}
             aria-label="Volume"
+            className="mini-secondary-volume-slider"
           />
-          <button className="text-control" type="button" onClick={() => setMuted((value) => !value)}>
-            {muted ? 'Unmute' : 'Mute'}
-          </button>
         </Box>
-
-        <Box className="utility-panel">
-          <Box className="mini-label">
-            <Maximize2 size={18} />
-            <span>Playback</span>
-          </Box>
-          <Box className="speed-row">
-            {[0.75, 1, 1.25, 1.5].map((option) => (
-              <button
-                key={option}
-                className={speed === option ? 'speed active' : 'speed'}
-                type="button"
-                onClick={() => setSpeed(option)}
-              >
-                {option}x
-              </button>
-            ))}
-          </Box>
-        </Box>
-      </Box>
-
-      <Box className="queue-panel">
-        <Box className="mini-label">
-          <ListMusic size={18} />
-          <span>Up next</span>
-        </Box>
-        {tracks.slice(0, 4).map((track) => (
-          <button
-            className={`queue-item ${track.id === activeTrack.id ? 'active' : ''}`}
-            key={track.id}
-            onClick={() => onTrackChange(track)}
-            type="button"
+        <Tooltip title={queueOpen ? 'Hide queue' : 'Up next'}>
+          <IconButton
+            onClick={onToggleQueue}
+            aria-label="Toggle queue"
+            className={`mini-icon-btn${queueOpen ? ' control-on' : ''}`}
           >
-            <span>{track.title}</span>
-            <span>{formatDuration(track.duration)}</span>
-          </button>
-        ))}
+            <ListMusic size={18} />
+          </IconButton>
+        </Tooltip>
       </Box>
+
+      <Menu
+        anchorEl={speedAnchor}
+        open={speedOpen}
+        onClose={() => setSpeedAnchor(null)}
+        anchorOrigin={{ vertical: 'top', horizontal: 'center' }}
+        transformOrigin={{ vertical: 'bottom', horizontal: 'center' }}
+        slotProps={{ paper: { className: 'speed-menu' } }}
+      >
+        {SPEED_OPTIONS.map((option) => (
+          <MenuItem key={option} selected={option === speed} onClick={() => selectSpeed(option)}>
+            {option}x{option === 1 ? ' (normal)' : ''}
+          </MenuItem>
+        ))}
+      </Menu>
     </Box>
   );
 }
