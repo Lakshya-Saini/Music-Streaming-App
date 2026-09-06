@@ -118,10 +118,86 @@ a {
   white-space: nowrap;
 }
 
-.theme-toggle {
+.navbar-login-btn {
   justify-self: end;
-  color: var(--text) !important;
-  border: 1px solid var(--line) !important;
+  display: inline-flex;
+  align-items: center;
+  height: 38px;
+  padding: 0 18px;
+  border-radius: 999px;
+  color: #ffffff;
+  background: var(--accent);
+  font-weight: 750;
+  font-size: 0.9rem;
+  white-space: nowrap;
+}
+
+.navbar-profile {
+  justify-self: end;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 38px;
+  padding: 0 10px 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.navbar-profile:hover,
+.navbar-profile.open {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+}
+
+.navbar-avatar {
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #ffffff;
+  background: var(--accent);
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.navbar-profile-name {
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.navbar-profile-menu {
+  min-width: 220px;
+}
+
+.navbar-profile-menu-header {
+  padding: 10px 14px 12px;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 4px;
+}
+
+.navbar-profile-menu-name {
+  font-weight: 780 !important;
+}
+
+.navbar-profile-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  color: var(--accent) !important;
+  background: var(--accent-soft) !important;
+  font-size: 0.72rem;
+  font-weight: 750;
 }
 
 .search-wrap {
@@ -294,6 +370,8 @@ a {
   position: sticky;
   top: var(--navbar-height);
   height: calc(100vh - var(--navbar-height));
+  display: flex;
+  flex-direction: column;
   overflow-y: auto;
 }
 
@@ -331,6 +409,31 @@ a {
 .sidebar-link.active {
   background: var(--accent-soft);
   color: var(--accent);
+}
+
+.sidebar-theme-toggle {
+  position: sticky;
+  bottom: 0;
+  margin-top: auto;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 12px;
+  border: 0;
+  border-top: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  color: var(--muted);
+  font-weight: 650;
+  font-size: 0.92rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sidebar-theme-toggle:hover {
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 .mobile-tab-bar {
@@ -429,6 +532,87 @@ a {
   padding: 6px 10px;
   font-size: 0.82rem;
   font-weight: 700;
+}
+
+/* ---------- Auth pages ---------- */
+
+.auth-page {
+  min-height: calc(100vh - var(--navbar-height) - var(--player-height) - 48px);
+  display: grid;
+  place-items: center;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 32px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.auth-field {
+  margin-top: 4px !important;
+}
+
+.auth-submit {
+  margin-top: 8px !important;
+}
+
+.auth-error {
+  color: var(--danger) !important;
+  font-size: 0.86rem !important;
+}
+
+.auth-switch {
+  align-self: center;
+  color: var(--muted) !important;
+  font-size: 0.88rem !important;
+}
+
+.auth-switch a {
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.auth-link-btn {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  font-weight: 700;
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+
+.google-signin-wrap {
+  align-self: center;
+  padding: 8px 0 4px;
+}
+
+.google-signin-placeholder {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px dashed var(--line);
+  border-radius: var(--radius-sm);
+  color: var(--muted) !important;
+  font-size: 0.82rem !important;
+  line-height: 1.5;
+}
+
+.google-signin-placeholder code {
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.auth-admin-form {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 
 /* ---------- Home page ---------- */
@@ -1729,9 +1913,14 @@ a {
     grid-row: 1;
   }
 
-  .theme-toggle {
+  .navbar-login-btn,
+  .navbar-profile {
     grid-column: 2;
     grid-row: 1;
+  }
+
+  .navbar-profile-name {
+    display: none;
   }
 
   .search-wrap {

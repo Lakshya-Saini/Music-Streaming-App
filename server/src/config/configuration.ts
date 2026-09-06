@@ -23,4 +23,9 @@ export default () => ({
   client: {
     origin: process.env.CLIENT_ORIGIN?.trim(),
   },
+  auth: {
+    jwtSecret: process.env.JWT_SECRET?.trim(),
+    jwtExpiresIn: process.env.JWT_EXPIRES_IN ?? '7d',
+    googleClientId: process.env.GOOGLE_CLIENT_ID?.trim(),
+  },
 });

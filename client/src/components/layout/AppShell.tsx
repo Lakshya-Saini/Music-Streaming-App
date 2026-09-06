@@ -20,9 +20,9 @@ export function AppShell({ mode, onToggleMode }: AppShellProps) {
 
   return (
     <Box className="app-shell">
-      <Navbar mode={mode} onToggleMode={onToggleMode} />
+      <Navbar />
       <Box className="app-body">
-        <Sidebar />
+        <Sidebar mode={mode} onToggleMode={onToggleMode} />
         <Box component="main" className="app-main">
           <Outlet />
         </Box>

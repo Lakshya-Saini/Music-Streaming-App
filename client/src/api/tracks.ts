@@ -1,3 +1,4 @@
+import { authHeaders, getStoredToken } from './auth';
 import { AudioAsset, Track } from '../types';
 
 interface UploadSessionRequest {
@@ -113,6 +114,7 @@ export async function createUploadSession(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...authHeaders(),
     },
     body: JSON.stringify(payload),
   });
@@ -135,13 +137,25 @@ export async function listReadyTracks(): Promise<Track[]> {
   return payload.data.map((track, index) => mapApiTrack(track, index));
 }
 
+/**
+ * The native <audio> element issues this request itself and cannot attach an
+ * Authorization header, so the access token rides along as a query param
+ * instead - the server's JwtAuthGuard accepts either form.
+ */
+function withStreamToken(url: string): string {
+  const token = getStoredToken();
+  return token ? `${url}&token=${encodeURIComponent(token)}` : url;
+}
+
 export function streamingUrlFor(trackId: string, network: string): string {
-  return `${API_BASE_URL}/tracks/${trackId}/stream?quality=auto&network=${encodeURIComponent(network)}`;
+  return withStreamToken(
+    `${API_BASE_URL}/tracks/${trackId}/stream?quality=auto&network=${encodeURIComponent(network)}`,
+  );
 }
 
 /** Requests a specific rendition explicitly, bypassing the server's network-guess fallback entirely. */
 export function streamingUrlForQuality(trackId: string, quality: AudioAsset['quality']): string {
-  return `${API_BASE_URL}/tracks/${trackId}/stream?quality=${encodeURIComponent(quality)}`;
+  return withStreamToken(`${API_BASE_URL}/tracks/${trackId}/stream?quality=${encodeURIComponent(quality)}`);
 }
 
 export function uploadFileToS3(
@@ -190,6 +204,7 @@ export function uploadFileToS3(
 export async function processUploadedTrack(trackId: string): Promise<unknown> {
   const response = await fetch(`${API_BASE_URL}/tracks/${trackId}/process`, {
     method: 'POST',
+    headers: { ...authHeaders() },
   });
 
   if (!response.ok) {
@@ -206,6 +221,7 @@ export async function importYoutubeTrack(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...authHeaders(),
     },
     body: JSON.stringify(payload),
   });
@@ -225,6 +241,7 @@ export async function createCoverUploadSession(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      ...authHeaders(),
     },
     body: JSON.stringify(payload),
   });

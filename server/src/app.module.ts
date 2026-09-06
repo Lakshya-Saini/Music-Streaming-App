@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import configuration from './config/configuration';
 import { envValidationSchema } from './config/env.validation';
+import { AuthModule } from './modules/auth/auth.module';
 import { TracksModule } from './modules/tracks/tracks.module';
 
 @Module({
@@ -21,6 +22,7 @@ import { TracksModule } from './modules/tracks/tracks.module';
         uri: config.getOrThrow<string>('mongodb.uri'),
       }),
     }),
+    AuthModule,
     TracksModule,
   ],
 })

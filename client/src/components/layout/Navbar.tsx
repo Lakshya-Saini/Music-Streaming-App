@@ -1,21 +1,25 @@
-import { Box, ClickAwayListener, IconButton, InputBase, Tooltip, Typography } from '@mui/material';
-import { Moon, Music2, Play, Search, Sun, X } from 'lucide-react';
+import { Box, ClickAwayListener, IconButton, InputBase, Menu, MenuItem, Typography } from '@mui/material';
+import { ChevronDown, LogOut, Music2, Play, Search, ShieldCheck, X } from 'lucide-react';
 import { useState } from 'react';
-import { Link } from 'react-router-dom';
-import type { AppMode } from '../../App';
+import { Link, useNavigate } from 'react-router-dom';
+import { useAuth } from '../../state/AuthContext';
 import { useLibrary } from '../../state/LibraryContext';
 import { formatDuration } from '../../utils/format';
 import { languageLabel } from '../../utils/languages';
 
-interface NavbarProps {
-  mode: AppMode;
-  onToggleMode: () => void;
-}
-
-export function Navbar({ mode, onToggleMode }: NavbarProps) {
+export function Navbar() {
   const { searchQuery, setSearchQuery, searchResults, playTrack } = useLibrary();
+  const { user, isAuthenticated, logout } = useAuth();
+  const navigate = useNavigate();
   const [focused, setFocused] = useState(false);
+  const [profileAnchor, setProfileAnchor] = useState<HTMLElement | null>(null);
   const showDropdown = focused && searchQuery.trim().length > 0;
+
+  const handleLogout = () => {
+    setProfileAnchor(null);
+    logout();
+    navigate('/');
+  };
 
   const handleSelect = (trackId: string) => {
     const track = searchResults.find((item) => item.id === trackId);
@@ -101,11 +105,46 @@ export function Navbar({ mode, onToggleMode }: NavbarProps) {
         </Box>
       </ClickAwayListener>
 
-      <Tooltip title={mode === 'dark' ? 'Use light mode' : 'Use dark mode'}>
-        <IconButton className="theme-toggle" onClick={onToggleMode} aria-label="Toggle dark mode">
-          {mode === 'dark' ? <Sun size={20} /> : <Moon size={20} />}
-        </IconButton>
-      </Tooltip>
+      {isAuthenticated && user ? (
+        <>
+          <button
+            type="button"
+            className={`navbar-profile${Boolean(profileAnchor) ? ' open' : ''}`}
+            onClick={(event) => setProfileAnchor(event.currentTarget)}
+          >
+            <span className="navbar-avatar">{user.name.charAt(0).toUpperCase()}</span>
+            <span className="navbar-profile-name">{user.name}</span>
+            <ChevronDown size={14} />
+          </button>
+          <Menu
+            anchorEl={profileAnchor}
+            open={Boolean(profileAnchor)}
+            onClose={() => setProfileAnchor(null)}
+            anchorOrigin={{ vertical: 'bottom', horizontal: 'right' }}
+            transformOrigin={{ vertical: 'top', horizontal: 'right' }}
+            slotProps={{ paper: { className: 'speed-menu navbar-profile-menu' } }}
+          >
+            <Box className="navbar-profile-menu-header">
+              <Typography className="navbar-profile-menu-name">{user.name}</Typography>
+              <Typography className="section-subtitle">{user.email}</Typography>
+              {user.role === 'admin' && (
+                <span className="navbar-profile-badge">
+                  <ShieldCheck size={12} />
+                  Admin
+                </span>
+              )}
+            </Box>
+            <MenuItem onClick={handleLogout}>
+              <LogOut size={16} />
+              <span>Log out</span>
+            </MenuItem>
+          </Menu>
+        </>
+      ) : (
+        <Link to="/login" className="navbar-login-btn">
+          Log in
+        </Link>
+      )}
     </Box>
   );
 }

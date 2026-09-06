@@ -1,5 +1,8 @@
-import { Body, Controller, Get, Headers, Param, Post, Query, Res } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Param, Post, Query, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
+import { Roles } from '../../auth/decorators/roles.decorator';
+import { JwtAuthGuard } from '../../auth/guards/jwt-auth.guard';
+import { RolesGuard } from '../../auth/guards/roles.guard';
 import { ImportYoutubeTrackDto } from '../dto/import-youtube-track.dto';
 import { InitiateCoverUploadDto } from '../dto/initiate-cover-upload.dto';
 import { InitiateTrackUploadDto } from '../dto/initiate-track-upload.dto';
@@ -12,6 +15,8 @@ export class TracksController {
   constructor(private readonly tracksService: TracksService) {}
 
   @Post('upload-session')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
   async createUploadSession(
     @Body() dto: InitiateTrackUploadDto,
   ): Promise<Record<string, unknown>> {
@@ -19,6 +24,8 @@ export class TracksController {
   }
 
   @Post('youtube-import')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
   async importFromYoutube(
     @Body() dto: ImportYoutubeTrackDto,
   ): Promise<Record<string, unknown>> {
@@ -26,11 +33,15 @@ export class TracksController {
   }
 
   @Post(':id/process')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
   async processUploadedTrack(@Param('id') id: string): Promise<Record<string, unknown>> {
     return this.tracksService.processUploadedTrack(id);
   }
 
   @Post(':id/cover-upload-session')
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles('admin')
   async createCoverUploadSession(
     @Param('id') id: string,
     @Body() dto: InitiateCoverUploadDto,
@@ -53,6 +64,7 @@ export class TracksController {
   }
 
   @Get(':id/stream')
+  @UseGuards(JwtAuthGuard)
   async streamTrack(
     @Param('id') id: string,
     @Query() query: StreamTrackQueryDto,

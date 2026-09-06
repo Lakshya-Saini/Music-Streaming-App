@@ -15,9 +15,11 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { AudioAsset, Track } from '../types';
 import { formatDuration } from '../utils/format';
 import { streamingUrlForQuality } from '../api/tracks';
+import { useAuth } from '../state/AuthContext';
 import {
   nextHigherQuality,
   nextLowerQuality,
@@ -51,6 +53,8 @@ export function MusicPlayer({
   queueOpen,
   onToggleQueue,
 }: MusicPlayerProps) {
+  const { isAuthenticated } = useAuth();
+  const navigate = useNavigate();
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const loadRequestRef = useRef(0);
   const stallTimestampsRef = useRef<number[]>([]);
@@ -126,6 +130,16 @@ export function MusicPlayer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTrack]);
 
+  /** Logging out mid-playback should stop the stream immediately, not linger until the next interaction. */
+  useEffect(() => {
+    if (isAuthenticated) return;
+    const audio = audioRef.current;
+    if (audio && !audio.paused) {
+      audio.pause();
+    }
+    setPlaying(false);
+  }, [isAuthenticated]);
+
   /** Every so often, check whether the connection now supports a better rendition than the one picked at play time. */
   useEffect(() => {
     if (!playing || !currentAsset) return;
@@ -199,6 +213,10 @@ export function MusicPlayer({
   const ensureStreamReady = async (): Promise<AudioAsset | null> => {
     const audio = audioRef.current;
     if (!audio) return null;
+    if (!isAuthenticated) {
+      navigate('/login');
+      return null;
+    }
     if (audio.src && currentAsset) {
       return currentAsset;
     }

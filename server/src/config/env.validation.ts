@@ -27,4 +27,7 @@ export const envValidationSchema = Joi.object({
   YT_DLP_PATH: Joi.string().default('yt-dlp'),
   MAX_UPLOAD_SIZE_MB: Joi.number().integer().min(1).max(20480).default(500),
   CLIENT_ORIGIN: Joi.string().trim().allow('').optional(),
+  JWT_SECRET: Joi.string().trim().min(32).required(),
+  JWT_EXPIRES_IN: Joi.string().trim().default('7d'),
+  GOOGLE_CLIENT_ID: Joi.string().trim().allow('').optional(),
 });
