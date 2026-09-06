@@ -407,7 +407,13 @@ export function MusicPlayer({
       <audio
         ref={audioRef}
         preload="none"
-        onLoadedMetadata={(event) => setDuration(event.currentTarget.duration || activeTrack.duration)}
+        onLoadedMetadata={(event) => {
+          setDuration(event.currentTarget.duration || activeTrack.duration);
+          // audio.load() resets playbackRate to 1 in every browser; reapply
+          // the selected speed each time a new resource finishes loading
+          // (initial stream, quality switch, or track/replay reload).
+          event.currentTarget.playbackRate = speed;
+        }}
         onTimeUpdate={(event) => handleTimeUpdate(event.currentTarget)}
         onProgress={updateBufferedTime}
         onCanPlay={updateBufferedTime}
