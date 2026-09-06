@@ -9,11 +9,12 @@
 | Language | TypeScript | ^5.7.2 | Compile-time safety across the API contract (`types.ts` mirrors server DTOs) |
 | Component library | MUI (`@mui/material`) | ^6.4.12 | Ready-made accessible primitives (`Slider`, `Menu`, `ToggleButtonGroup`, `LinearProgress`) used throughout the player and upload UI |
 | Styling engine | Emotion (`@emotion/react`/`styled`) | ^11.14.x | MUI's underlying styling engine; also backs the custom `theme.ts` light/dark tokens |
-| Routing | React Router | ^7.1.1 | Client-side routes: `/`, `/browse`, `/playlists`, `/upload` |
+| Routing | React Router | ^7.1.1 | Client-side routes: `/`, `/browse`, `/login`, `/playlists` (auth-gated), `/upload` (admin-gated) |
 | Icons | `lucide-react` | ^0.468.0 | Icon set used across the player, upload stages, and nav |
 | Custom CSS | `styles.css` + CSS variables (`--text`, `--accent`, etc.) | — | Theme tokens toggled via `document.documentElement.dataset.theme` |
+| Sign-in | Google Identity Services (`accounts.google.com/gsi/client`) | — (loaded directly, no npm package) | Renders the "Continue with Google" button and returns a signed ID token; the app never handles a listener's password at all — see [ADR-0008](adr/0008-google-oauth-users-password-admin.md) |
 
-No client-side state management library is used — a single `LibraryContext` (React Context + hooks) is sufficient for the app's scope (one shared track list, one active track, one search query).
+No client-side state management library is used — `LibraryContext` and `AuthContext` (React Context + hooks) are sufficient for the app's scope (one shared track list, one active track, one search query, one signed-in user).
 
 ## Server (`server/`)
 
@@ -27,6 +28,9 @@ No client-side state management library is used — a single `LibraryContext` (R
 | Validation | `class-validator` + `class-transformer` | ^0.14.2 / ^0.5.1 | Declarative DTO validation (`@IsString`, `@Matches` for ISRC/language tags, etc.) applied automatically by Nest's `ValidationPipe` |
 | Audio transcoding | `ffmpeg` / `ffprobe` (external binaries, invoked via `node:child_process.spawn`) | image-installed via `apt-get` | Industry-standard, scriptable, and already the right tool for AAC-LC encoding, `+faststart` muxing, and stream probing; args are passed as an array (no shell) to avoid injection |
 | YouTube import | `yt-dlp` (external binary, invoked via `spawn`) | pip-installed in the Docker image | Actively maintained YouTube extractor; used only for metadata (`-j`) and best-audio download, gated behind a host allow-list and an explicit authorization flag |
+| Auth tokens | `@nestjs/jwt` | ^12.0.1 | Signs/verifies the app's own JWT (`{ sub, email, role }`) issued after either sign-in path succeeds |
+| Password hashing | `bcrypt` | ^6.0.0 | Hashes the single admin account's password; never used for Google accounts, which have no password at all |
+| Google token verification | `google-auth-library` | ^11.0.2 | Verifies a Google ID token's signature, audience (`GOOGLE_CLIENT_ID`), and `email_verified` claim server-side before trusting it |
 
 ## Infrastructure
 
@@ -45,5 +49,6 @@ These were consciously deferred rather than overlooked — see the corresponding
 - **HLS/DASH** — true segment-level adaptive bitrate streaming. Current ABR swaps whole renditions in place instead ([ADR-0002](adr/0002-multi-bitrate-aac-renditions.md)).
 - **A queue/worker system** (SQS, BullMQ, etc.) — `/tracks/:id/process` and `/tracks/youtube-import` run synchronously in-request today; acceptable at current upload volume, but the pipeline is already isolated into standalone services so it can move behind a worker later without a rewrite ([ADR-0006](adr/0006-state-based-processing-pipeline.md)).
 - **CloudFront / signed cookies** — audio bytes are proxied through the NestJS server rather than served directly from S3/CDN, which is simpler for local development and keeps object keys private, at the cost of API bandwidth.
-- **Authentication** — none yet; every route is open. Out of scope for v1.
+- **Password-based self-registration for listeners** — deliberately not offered at all, not just deferred; see [ADR-0008](adr/0008-google-oauth-users-password-admin.md). Listeners authenticate through Google only.
+- **Refresh tokens / token revocation** — the JWT is a long-lived (`JWT_EXPIRES_IN`, default 7d), stateless bearer token with no server-side session to revoke early; acceptable for a v1 scope with one admin and low-stakes listener accounts, but logging out only discards the client's copy of the token, it doesn't invalidate it server-side.
 - **Full-text search service (OpenSearch/Elasticsearch)** — a basic MongoDB text index over `title`/`artist`/`album`/`genre` covers today's catalog size.

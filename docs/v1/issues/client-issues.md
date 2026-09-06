@@ -111,6 +111,18 @@ Verification for this fix relied on `tsc --noEmit`, nginx access-log inspection 
 
 ---
 
+## "Continue with Google" button showed the "not configured" placeholder after setting VITE_GOOGLE_CLIENT_ID
+
+**Symptom:** After adding a real Google OAuth Client ID to both `server/.env` (`GOOGLE_CLIENT_ID`) and `client/.env` (`VITE_GOOGLE_CLIENT_ID`) and rebuilding via `docker compose up -d --build`, the login page still showed `GoogleSignInButton`'s "Google sign-in isn't configured yet" placeholder instead of the real button. The server side worked correctly (`POST /auth/google` with a bogus token returned `401` "Could not verify", not the `503` "not configured" it returns when `GOOGLE_CLIENT_ID` is genuinely unset), so only the client was affected.
+
+**Root cause:** `VITE_`-prefixed variables are inlined into the JavaScript bundle by Vite at *build* time, not read at runtime — so whatever value was present when `vite build` ran is permanent until the next build. The client's `Dockerfile` takes this value as a build `ARG`, and `docker-compose.yml`'s `client.build.args` supplies it as `${VITE_GOOGLE_CLIENT_ID:-}`. Docker Compose resolves that substitution from a `.env` file **next to `docker-compose.yml`** (the repo root) or the calling shell's environment — it does not read `client/.env`, which is a file Vite itself loads, not something Docker Compose knows about. Since only `client/.env` had been created, `docker compose build` substituted an empty string for the build arg every time, regardless of what was in `client/.env`.
+
+**Fix:** Created a root-level `.env` (gitignored, alongside a new root `.gitignore`) containing `VITE_GOOGLE_CLIENT_ID=<the same value as client/.env>`, then rebuilt: `docker compose up -d --build client`. Verified by grepping the rebuilt bundle for the client ID string directly (`curl` the built `assets/index-*.js` and check the value is actually present) rather than trusting the UI alone, since a stale cached bundle would look identical to a correctly-updated one at a glance.
+
+**Takeaway:** any `VITE_`-prefixed value only ever needs to exist in *one* of two places depending on how the client is being run — `client/.env` for `npm run dev` / a local `vite build`, or a root `.env` (or exported shell variable) for `docker compose build` — and the two are not interchangeable. Setting it in only one when running via the other silently keeps the old (or empty) value baked into the bundle with no error at build or run time.
+
+---
+
 ## Automated browser tooling cannot play audio
 
 Not a bug in the app itself, but worth recording since it shaped how several of the fixes above were verified: the Claude-in-Chrome browser automation tooling used during development cannot fetch or decode `<audio>`/`<video>` sources at all. This was confirmed twice, independent of any app code — a manually created `<audio>` element pointed at a real stream URL never advanced past `readyState: 0` and `.play()` hung the automation's JS execution entirely; a trivial embedded silent WAV `data:` URI (zero network involved) hung identically. Streaming and seeking fixes made during this project were therefore verified through `fetch()`-based probes, `curl` timing tests, and server/nginx access-log inspection instead of literal in-browser playback, and should be spot-checked in a real browser after any further player changes.

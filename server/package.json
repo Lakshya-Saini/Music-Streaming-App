@@ -25,6 +25,7 @@
     "bcrypt": "^6.0.0",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.2",
+    "dotenv": "^17.4.2",
     "google-auth-library": "^11.0.2",
     "joi": "^17.13.3",
     "mongoose": "^8.8.4",
@@ -42,7 +43,6 @@
     "@types/node": "^22.17.1",
     "@typescript-eslint/eslint-plugin": "^8.39.0",
     "@typescript-eslint/parser": "^8.39.0",
-    "dotenv": "^17.4.2",
     "eslint": "^9.33.0",
     "prettier": "^3.6.2",
     "typescript": "^5.9.2"

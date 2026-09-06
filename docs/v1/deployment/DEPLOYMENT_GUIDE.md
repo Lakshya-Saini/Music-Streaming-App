@@ -151,6 +151,18 @@ FFPROBE_PATH=ffprobe
 YT_DLP_PATH=yt-dlp
 MAX_UPLOAD_SIZE_MB=500
 CLIENT_ORIGIN=https://music.yourdomain.com
+
+JWT_SECRET=<generate with: node -e "console.log(require('crypto').randomBytes(48).toString('base64'))">
+JWT_EXPIRES_IN=7d
+GOOGLE_CLIENT_ID=<your Google OAuth Client ID>
+```
+
+In [Google Cloud Console](https://console.cloud.google.com/) → APIs & Services → Credentials → your OAuth Client ID, add `https://music.yourdomain.com` as an authorized JavaScript origin (in addition to `http://localhost:5173` if you also develop against this same client ID) — Google rejects sign-in attempts from origins that aren't on this list, with no server-side workaround.
+
+Also create a `.env` at the **repo root** (not inside `server/` or `client/`) with the same client ID, since `docker-compose.prod.yml`'s `client` build reads it from there as a build arg (see step 8):
+
+```env
+VITE_GOOGLE_CLIENT_ID=<the same Google OAuth Client ID as above>
 ```
 
 ---
@@ -180,6 +192,7 @@ services:
       context: ./client
       args:
         VITE_API_BASE_URL: /api/v1
+        VITE_GOOGLE_CLIENT_ID: ${VITE_GOOGLE_CLIENT_ID:-}
     restart: unless-stopped
     depends_on:
       - server
@@ -249,6 +262,14 @@ curl "https://music.yourdomain.com/api/v1/tracks?limit=1"
 
 Then open `https://music.yourdomain.com` in a browser and confirm the app loads, and that uploading or streaming a track works end to end.
 
+Create the one admin account directly against the `server` container (both arguments are required, and re-running this later with the same email rotates its password rather than creating a second admin — see [ADR-0008](../adr/0008-google-oauth-users-password-admin.md)):
+
+```bash
+docker compose -f docker-compose.prod.yml exec server node scripts/seed-admin.js <your-email> <a-strong-password>
+```
+
+Sign in as that admin from `/login` (the "Sign in as admin instead" link) to confirm the Upload nav item appears; everyone else signs in with Google.
+
 ---
 
 ## 10. Make it resilient to reboots and host failures
@@ -294,7 +315,7 @@ docker compose -f docker-compose.prod.yml logs -f client
 **Backups:**
 - MongoDB data lives in Atlas, which handles backups for you (even on the M0 free tier, Atlas retains a basic snapshot).
 - Audio/cover data lives in S3 — enable [S3 Versioning](https://docs.aws.amazon.com/AmazonS3/latest/userguide/Versioning.html) on the bucket if you want protection against accidental overwrite/delete; it costs a little extra storage for retained versions but nothing if you never overwrite objects (this app never does — object keys are content-addressed by track ID and version).
-- The EC2 instance itself is stateless application code plus Docker images — nothing on it needs backing up beyond your Git repository and `server/.env` (keep a copy of `.env` somewhere safe, e.g. a password manager or AWS Secrets Manager — it is deliberately not committed to Git).
+- The EC2 instance itself is stateless application code plus Docker images — nothing on it needs backing up beyond your Git repository, `server/.env`, and the repo-root `.env` (keep copies somewhere safe, e.g. a password manager or AWS Secrets Manager — both are deliberately not committed to Git).
 
 **Monitoring:**
 - Basic CPU/network/disk metrics are available for free in the EC2 console under **Monitoring**.
@@ -303,6 +324,7 @@ docker compose -f docker-compose.prod.yml logs -f client
 **Security housekeeping:**
 - Keep the OS patched: `sudo apt update && sudo apt upgrade` periodically (or enable unattended-upgrades).
 - Rotate the IAM access key used in `server/.env` periodically.
+- Rotating `JWT_SECRET` invalidates every issued token at once (everyone gets signed out) — fine to do occasionally, but there's no partial/rolling rotation, so plan for the disruption rather than doing it reflexively.
 - If you stop needing direct SSH access day-to-day, consider switching to [AWS Systems Manager Session Manager](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager.html) and closing port 22 in the security group entirely.
 
 ---

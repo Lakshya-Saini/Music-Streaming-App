@@ -18,6 +18,7 @@ RUN apt-get update \
 COPY package*.json ./
 RUN npm ci --omit=dev
 COPY --from=build /app/dist ./dist
+COPY scripts ./scripts
 RUN mkdir -p temp
 EXPOSE 3001
 CMD ["node", "dist/main.js"]

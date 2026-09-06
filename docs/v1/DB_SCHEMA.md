@@ -2,13 +2,27 @@
 
 MongoDB is used purely for searchable catalog metadata and processing state. Audio bytes and images never touch MongoDB — they live in S3, referenced by object key. This keeps documents small and keeps binary data out of database backups.
 
-Database: `music-streaming` (from `MONGODB_URI`). Two collections: `tracks` and `audioassets`.
+Database: `music-streaming` (from `MONGODB_URI`). Three collections: `tracks`, `audioassets`, and `users`.
 
 ## Entity relationship
+
+`users` has no foreign-key relationship to `tracks`/`audioassets` — there is no per-user ownership or ACL on catalog data today; a JWT's `role` claim alone decides which routes a request may reach (see [`ARCHITECTURE.md`](ARCHITECTURE.md#11-authentication) and [ADR-0008](adr/0008-google-oauth-users-password-admin.md)).
 
 ```mermaid
 erDiagram
     TRACKS ||--o{ AUDIOASSETS : "has renditions"
+
+    USERS {
+        ObjectId _id PK
+        string name
+        string email UK
+        string passwordHash "optional - password accounts only"
+        string googleId UK "optional, sparse - google accounts only"
+        string authProvider "password | google"
+        string role "user | admin"
+        date createdAt
+        date updatedAt
+    }
 
     TRACKS {
         ObjectId _id PK
@@ -157,6 +171,33 @@ Schema source: `server/src/modules/tracks/schemas/audio-asset.schema.ts`. Mongoo
 ```
 
 The compound unique index prevents two documents for the same track/version/bitrate from existing simultaneously — `encodeUploadAndActivate` always `deleteMany`s the existing version's assets before `insertMany`-ing the freshly-encoded set, so a re-run of processing can't leave duplicate or orphaned renditions behind.
+
+## `users` collection
+
+Schema source: `server/src/modules/auth/schemas/user.schema.ts`. Mongoose `{ timestamps: true, collection: 'users' }`.
+
+| Field | Type | Notes |
+|---|---|---|
+| `name` | `string` (required, trimmed) | For Google accounts, taken from the Google profile at first sign-in |
+| `email` | `string` (required, trimmed, lowercased, unique) | Indexed. The one identifier shared by both auth methods |
+| `passwordHash` | `string` (optional) | Set only for the admin's password account; bcrypt hash, never the plaintext. Absent on Google accounts |
+| `googleId` | `string` (optional, sparse unique index) | Google's stable per-account subject (`sub`) claim. Absent on the password account |
+| `authProvider` | `enum 'password' \| 'google'` (required) | Which flow this account actually authenticates through; doesn't change if the fields above are present, only which one is authoritative |
+| `role` | `enum 'user' \| 'admin'` (required, default `'user'`) | `admin` is set only by `scripts/seed-admin.js`; nothing in the API can set or change it |
+| `createdAt` / `updatedAt` | `Date` | Mongoose timestamps |
+
+### Indexes on `users`
+
+```js
+{ email: 1 }, { unique: true }
+{ googleId: 1 }, { unique: true, sparse: true }
+```
+
+The `sparse` option on the `googleId` index is deliberate: without it, MongoDB's unique index would treat every document missing the field (i.e. every password account) as sharing the same implicit `null` value and reject all but the first one. `sparse` excludes documents that don't have the field from the uniqueness check entirely, so any number of password accounts can coexist while still guaranteeing no two Google accounts share a `googleId`.
+
+### Invariants enforced outside the schema
+
+MongoDB has no way to express "at most one document where `role = 'admin'`" as a schema constraint, so it's enforced procedurally instead: `scripts/seed-admin.js` (the only code path that ever sets `role: 'admin'`) reads for an existing admin first and refuses to proceed if one exists under a different email. Nothing in the HTTP API can create, promote, or demote an admin at all — `AuthService.register` was removed for this reason (see [ADR-0008](adr/0008-google-oauth-users-password-admin.md)), and `AuthService.loginWithGoogle` explicitly rejects sign-in attempts whose email already belongs to the admin account rather than allowing the two identities to merge.
 
 ## Consistency model
 
