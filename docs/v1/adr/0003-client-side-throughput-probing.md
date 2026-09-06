@@ -23,3 +23,9 @@ Separately, the original flow attached and began loading the `<audio>` source as
 - Every quality decision costs one small extra request (128 KB) before the "real" stream request — accepted as a small, bounded cost.
 - Because attachment is lazy, selecting a track in the UI (e.g. browsing, or auto-advance while paused) causes zero network requests; only explicit Play or Seek starts a stream. Auto-advance/Next/Previous *while already playing* is intentionally treated as "was playing" and continues automatically.
 - The old `network` query parameter and `targetBitrateForNetwork` server-side mapping remain in the codebase for the `quality=auto` fallback path (`streamingUrlFor`), but the primary client flow now always requests an explicit `quality=<tier>` chosen by throughput probing rather than relying on the server's network-guess.
+
+## Update: warm-up request added
+
+Real-world testing found the probe still under-selected quality on genuinely fast connections (e.g. Fast 4G throttling picking a low/normal rendition instead of very-high). The 128 KB timed sample included the cost of establishing the connection (DNS, TLS handshake, TCP slow-start) as part of the measured window — for a small sample, that one-time setup cost dominates the timing and makes even a fast connection look slow, especially since the probe is typically the first request made to the origin in a session.
+
+`probeThroughputBytesPerSecond` now issues a small (16 KB) `Range` fetch against the same URL first, discards it entirely, and only starts the timer for the *next* fetch (the same 128 KB sample as before, at a shifted byte offset). This means every quality decision now costs two small requests instead of one, but the timed portion measures sustained throughput on an already-open connection rather than being skewed by one-time setup cost.

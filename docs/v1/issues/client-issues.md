@@ -71,6 +71,46 @@ Verification for this fix relied on `tsc --noEmit`, nginx access-log inspection 
 
 ---
 
+## Bandwidth probe under-selected quality on genuinely fast connections
+
+**Symptom:** Even under Fast 4G throttling, the initial quality pick was consistently low/normal instead of very-high, and the same behavior was observed regardless of whether the throttle profile was Fast 4G, Slow 4G, or 3G — suggesting the probe wasn't distinguishing between them correctly.
+
+**Root cause:** `probeThroughputBytesPerSecond()` timed a single 128 KB ranged `fetch()` and used the elapsed time directly to compute bytes/sec. For a small sample, that elapsed time includes one-time connection setup cost (DNS, TLS handshake, TCP slow-start) — which dominates the timing when the probe is the first request made to the origin in a session, making even a fast connection measure as slow.
+
+**Fix:** Added a small (16 KB) warm-up `fetch()` against the same URL, discarded entirely, before starting the timer for the real 128 KB timed sample (now read from a shifted byte offset so it doesn't overlap the warm-up bytes). This costs one extra small request per quality decision but measures sustained throughput on an already-open connection rather than paying for handshake overhead inside the timed window. See the "Update" section of [ADR-0003](../adr/0003-client-side-throughput-probing.md).
+
+---
+
+## Service worker blocked the entire stream response on its own background cache write
+
+**Symptom:** Once the server-side chunk cap below was in place, the very first chunk of a stream still didn't reach the `<audio>` element until an unexpectedly long delay, disproportionate to the chunk's now-small size.
+
+**Root cause:** `stream-cache-worker.js`'s `handleStreamRange()` ran `await cachePrefix(request.url, response.clone())` before returning the response to the page. `cachePrefix` calls `response.arrayBuffer()` on the cloned response, which only resolves once the *entire* body has been read — so the `await` held up every byte of the real response until the service worker had independently finished downloading the same data a second time in the background. Before the server capped response sizes (see [`server-issues.md`](server-issues.md#a-single-stream-request-downloaded-the-entire-track-regardless-of-network-conditions)), this meant playback couldn't start until the entire remaining file had silently downloaded once already.
+
+**Fix:** Changed `handleStreamRange` to accept the `FetchEvent` and call `event.waitUntil(cachePrefix(...))` instead of awaiting it inline, so the real response streams to the page as soon as it's available and the cache write runs in the background without blocking anything. See [ADR-0007](../adr/0007-server-side-capped-byte-range-chunking.md).
+
+---
+
+## No app-wide block when the browser goes offline
+
+**Symptom:** Going offline mid-session only affected the currently-loaded track (a small tooltip icon on the mini-player, and playback pausing once it reached the edge of already-buffered audio) — there was no indication elsewhere in the app that the network was down, and refreshing the page while offline showed no indication at all until some other action failed.
+
+**Root cause:** The only offline handling lived inside `MusicPlayer.tsx`, reacting to `window`'s `online`/`offline` events. Nothing checked `navigator.onLine` outside the player, and nothing checked it synchronously on load — so a fresh page load while offline had no signal to react to until the next `offline` event fired, which never happens if the page loaded already offline.
+
+**Fix:** Added `OfflineGuard.tsx`, a full-screen non-dismissible overlay mounted once near the root of `App.tsx`. Its `isOnline` state initializes directly from `navigator.onLine` (so a refresh while offline shows the guard immediately, not just after a subsequent state change) and updates only via the `online`/`offline` events, clearing the moment `online` fires. The player's own inline buffered-playback handling (pausing at the edge of what's downloaded, blocking seeks past it) was left in place underneath, since it only ever matters once the guard has already been dismissed by reconnecting.
+
+---
+
+## Possible self-inflicted quality downgrades from the periodic re-probe
+
+**Symptom:** During one manual test session, a single track's quality was observed stepping down through every tier over about 90 seconds of continuous playback (`very_high` → `high` → `normal` → `low`), with no manual interaction and on a network that had no independent reason to be degrading. The gaps between downgrades (~24s, then ~17s) were suspiciously close to `UPGRADE_CHECK_INTERVAL_MS` (25s).
+
+**Hypothesis, not confirmed:** `maybeUpgradeQuality()` runs every 25 seconds while playing and, whenever a higher tier than the current one exists, performs its own throughput probe (a warm-up fetch plus a timed fetch, both against the lowest-bitrate rendition) concurrently with the actively-streaming playback request. On a constrained connection (or a busy local Docker network, as in this test), that probe traffic competing for the same limited bandwidth/connection pool could itself be enough to stall the primary stream — which `handleWaiting()` counts toward its "two stalls within 20 seconds triggers a downgrade" rule. If so, the periodic health-check would be periodically causing the exact symptom it exists to detect and recover from, and each downgrade would make the next periodic probe's relative bandwidth cost larger (since the primary stream's own bitrate just dropped), which would explain the shrinking interval between downgrades (~24s, then ~17s) rather than a steady 25s cadence.
+
+**Status:** Flagged, not changed — this project's browser-automation tooling cannot play audio at all (see below), so this could not be reproduced and confirmed under controlled conditions; it rests on the one manual session's timing correlation. If this resurfaces, check whether disabling `maybeUpgradeQuality()`'s periodic re-probe (while leaving `handleWaiting()`'s downgrade path active) stops the cascade — that would confirm the probe itself as the trigger rather than genuine network degradation.
+
+---
+
 ## Automated browser tooling cannot play audio
 
 Not a bug in the app itself, but worth recording since it shaped how several of the fixes above were verified: the Claude-in-Chrome browser automation tooling used during development cannot fetch or decode `<audio>`/`<video>` sources at all. This was confirmed twice, independent of any app code — a manually created `<audio>` element pointed at a real stream URL never advanced past `readyState: 0` and `.play()` hung the automation's JS execution entirely; a trivial embedded silent WAV `data:` URI (zero network involved) hung identically. Streaming and seeking fixes made during this project were therefore verified through `fetch()`-based probes, `curl` timing tests, and server/nginx access-log inspection instead of literal in-browser playback, and should be spot-checked in a real browser after any further player changes.

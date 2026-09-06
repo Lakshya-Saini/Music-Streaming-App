@@ -29,6 +29,20 @@ import { Readable } from 'node:stream';
 
 const PRESIGNED_UPLOAD_EXPIRES_SECONDS = 15 * 60;
 const SOURCE_CONTENT_TYPE = 'audio/wav';
+/**
+ * Every streaming response is capped to a slice of the rendition instead of
+ * however much the caller's Range asked for (including the wide-open
+ * `bytes=0-` the browser sends by default). Without a cap, a single request
+ * for an unbounded range causes S3 - and this server - to hand back the
+ * entire multi-megabyte file in one response, which defeats adaptive
+ * bitrate switching mid-track and wastes bandwidth on audio the listener
+ * may never reach. Capping forces the `<audio>` element to keep asking for
+ * more as playback actually progresses, the same pull-based behavior a
+ * segmented HLS/DASH stream gives for free.
+ */
+const STREAM_CHUNK_PARTS = 10;
+const MIN_STREAM_CHUNK_BYTES = 256 * 1024;
+const MAX_STREAM_CHUNK_BYTES = 2 * 1024 * 1024;
 const ACCEPTED_COVER_MIME_TYPES: Record<string, string> = {
   'image/jpeg': 'jpg',
   'image/png': 'png',
@@ -455,10 +469,23 @@ export class TracksService {
     }
 
     const selected = this.selectStreamingAsset(assets, query.quality, query.network);
-    const objectStream = await this.audioStorage.getObjectStream(selected.objectKey, range);
+
+    const resolvedRange = this.resolveStreamRange(range, selected.sizeBytes);
+    if (!resolvedRange) {
+      return {
+        body: Readable.from([]),
+        statusCode: 416,
+        headers: { 'Content-Range': `bytes */${selected.sizeBytes}` },
+      };
+    }
+
+    const objectStream = await this.audioStorage.getObjectStream(
+      selected.objectKey,
+      `bytes=${resolvedRange.start}-${resolvedRange.end}`,
+    );
 
     this.logger.log(
-      `Streaming ${selected.bitrate} bps ${selected.quality} rendition for track ${id}`,
+      `Streaming ${selected.bitrate} bps ${selected.quality} rendition for track ${id} (bytes ${resolvedRange.start}-${resolvedRange.end}/${selected.sizeBytes})`,
     );
 
     const headers: Record<string, string | number> = {
@@ -790,6 +817,34 @@ export class TracksService {
         },
       },
     );
+  }
+
+  /**
+   * Clamps whatever the client asked for down to a fixed-size slice of the
+   * rendition, splitting the file into roughly `STREAM_CHUNK_PARTS` pieces
+   * (bounded to a sane min/max) regardless of whether the caller sent an
+   * open-ended range (`bytes=0-`) or no Range header at all. Returns null
+   * when the requested start is past the end of the file (416).
+   */
+  private resolveStreamRange(
+    requestedRange: string | undefined,
+    totalBytes: number,
+  ): { start: number; end: number } | null {
+    const chunkBytes = Math.min(
+      MAX_STREAM_CHUNK_BYTES,
+      Math.max(MIN_STREAM_CHUNK_BYTES, Math.ceil(totalBytes / STREAM_CHUNK_PARTS)),
+    );
+
+    const match = requestedRange?.match(/^bytes=(\d+)-(\d*)$/);
+    const start = match ? Number(match[1]) : 0;
+    if (start >= totalBytes) {
+      return null;
+    }
+
+    const requestedEnd = match?.[2] ? Number(match[2]) : undefined;
+    const end = Math.min(requestedEnd ?? totalBytes - 1, start + chunkBytes - 1, totalBytes - 1);
+
+    return { start, end };
   }
 
   private selectStreamingAsset(

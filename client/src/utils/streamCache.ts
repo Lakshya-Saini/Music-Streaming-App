@@ -10,6 +10,14 @@ import { AudioAsset, Track } from '../types';
  * network it is actually on.
  */
 const PROBE_BYTES = 128 * 1024;
+/**
+ * Fetched and discarded before the timed sample below. Without it, the timed
+ * request pays for DNS/TLS/TCP setup and slow-start ramp-up as part of the
+ * measurement, which dominates the elapsed time for a small probe and makes
+ * even a fast connection look slow - the reported cause of high-bandwidth
+ * networks (e.g. Fast 4G) still resolving to a low-quality rendition.
+ */
+const PROBE_WARMUP_BYTES = 16 * 1024;
 const PROBE_TIMEOUT_MS = 4000;
 /** Require this much throughput headroom over a rendition's bitrate before picking it, so playback can stay ahead of realtime without constant rebuffering. */
 const ABR_SAFETY_FACTOR = 1.4;
@@ -46,11 +54,19 @@ export async function probeThroughputBytesPerSecond(track: Track): Promise<numbe
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
-  const startedAt = performance.now();
+  const url = streamingUrlForQuality(track.id, lowest.quality);
 
   try {
-    const response = await fetch(streamingUrlForQuality(track.id, lowest.quality), {
-      headers: { Range: `bytes=0-${PROBE_BYTES - 1}` },
+    await fetch(url, {
+      headers: { Range: `bytes=0-${PROBE_WARMUP_BYTES - 1}` },
+      signal: controller.signal,
+    });
+
+    const startedAt = performance.now();
+    const response = await fetch(url, {
+      headers: {
+        Range: `bytes=${PROBE_WARMUP_BYTES}-${PROBE_WARMUP_BYTES + PROBE_BYTES - 1}`,
+      },
       signal: controller.signal,
     });
     if (!response.ok && response.status !== 206) {

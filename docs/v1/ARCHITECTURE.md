@@ -219,37 +219,49 @@ sequenceDiagram
     participant S as S3
 
     Note over P: User presses Play (first time for this track)
-    P->>API: GET /stream?quality=low Range: bytes=0-131071 (probe, lowest tier)
+    P->>API: GET /stream?quality=low Range: bytes=0-16383 (probe warm-up, discarded)
+    API->>S: GetObject Range
+    S-->>API: 206 partial content
+    P->>API: GET /stream?quality=low Range: bytes=16384-147455 (probe, timed)
     API->>S: GetObject Range
     S-->>API: 206 partial content
     API-->>P: 206 (timed to measure bytes/sec)
     P->>P: pickQualityForThroughput(measured) -> e.g. "high"
     P->>AUD: set audio.src to quality=high, then audio.load()
-    AUD->>API: GET /stream?quality=high (Range headers as needed)
-    API->>S: GetObject Range
-    S-->>API: 206
-    API-->>AUD: 206, Cache-Control: immutable (explicit quality is deterministic)
+    AUD->>API: GET /stream?quality=high (Range: bytes=0- or none)
+    API->>API: resolveStreamRange caps the response to ~1/10th of the file
+    API->>S: GetObject Range (capped)
+    S-->>API: 206, only the capped slice
+    API-->>AUD: 206, Content-Range shows more data remains
     AUD->>P: playing
+    loop as playback consumes each buffered slice
+        AUD->>API: GET /stream?quality=high Range: bytes=<next-slice>
+        API->>S: GetObject Range (capped)
+        S-->>API: 206
+        API-->>AUD: 206
+    end
     loop every 25s while playing
-        P->>API: re-probe throughput
+        P->>API: re-probe throughput (warm-up + timed request, lowest tier)
         P->>P: upgrade in place if a higher tier is now affordable
     end
     Note over P,AUD: User seeks forward/backward
     P->>AUD: audio.currentTime = target (no manual prefetch)
     AUD->>API: browser-native Range request for the target region
-    API->>S: GetObject Range
+    API->>API: resolveStreamRange caps the response
+    API->>S: GetObject Range (capped)
     S-->>API: 206
     AUD-->>P: onSeeking (spinner) -> onSeeked (clears) -> playback resumes
 ```
 
 Key points:
 
-- **Throughput probing, not `navigator.connection`** — a timed 128 KB ranged fetch against the lowest-bitrate rendition drives the initial quality pick. `navigator.connection.effectiveType` is not trustworthy: it doesn't reflect Chrome DevTools throttling and isn't implemented in Safari/Firefox. See [ADR-0003](adr/0003-client-side-throughput-probing.md).
+- **Throughput probing, not `navigator.connection`** — a timed 128 KB ranged fetch against the lowest-bitrate rendition drives the initial quality pick, preceded by a small discarded 16 KB warm-up fetch on the same URL so DNS/TLS/TCP-slow-start setup cost isn't counted as part of the measured throughput (a fast connection with a cold socket previously measured as slow). `navigator.connection.effectiveType` is not trustworthy for this either way: it doesn't reflect Chrome DevTools throttling and isn't implemented in Safari/Firefox. See [ADR-0003](adr/0003-client-side-throughput-probing.md).
+- **Server-side capped byte-range chunking** — `TracksService.resolveStreamRange` never serves more than roughly 1/10th of a rendition's total size in one response (clamped between 256 KB and 2 MB), regardless of what the caller's `Range` header asked for. An open-ended `Range: bytes=0-` (or no `Range` header at all) used to make S3 — and this server — hand back the entire remaining file in a single response, which is why a single stream request could transfer several megabytes for a track the listener might stop after a few seconds. Because every response's `Content-Range` shows more data remains, the `<audio>` element naturally issues a fresh `Range` request as it drains each buffered slice, without any client-side timers. See [ADR-0007](adr/0007-server-side-capped-byte-range-chunking.md).
 - **In-place quality switching** — `switchToAsset()` swaps `audio.src` to a different rendition, restores `currentTime` once `loadedmetadata` fires, and resumes playback if it was playing. Downgrade triggers after two stalls within 20 seconds; upgrade is checked opportunistically every 25 seconds while playing.
 - **Native range-based seeking** — seeking sets `audio.currentTime` directly and lets the browser issue whatever `Range` request it needs, relying on `+faststart` encoding so the media engine can jump to arbitrary offsets without downloading everything before them. See [ADR-0004](adr/0004-native-range-based-seeking.md) and [the forward-seek issue writeup](issues/client-issues.md#infinite-loading-state-on-forward-seek).
-- **Caching** — an explicit `quality=<tier>` URL maps deterministically to one immutable file and is served `Cache-Control: private, max-age=604800, immutable`; `quality=auto` is `no-store` because the same URL can resolve to a different file depending on the caller's guessed network profile.
-- **Offline handling** — `playableSeekTime()` clamps a forward seek to the contiguously-buffered range while offline, and `handleTimeUpdate` pauses playback with a notice once it reaches the edge of what's actually been downloaded.
-- A `stream-cache-worker.js` service worker additionally caches the first prefix of each stream in the Cache Storage API as a complementary, best-effort browser-side cache; it is not required for correctness and passes through to the network for anything it doesn't have cached.
+- **Caching** — an explicit `quality=<tier>` URL maps deterministically to one immutable file and is served `Cache-Control: private, max-age=604800, immutable`; `quality=auto` is `no-store` because the same URL can resolve to a different file depending on the caller's guessed network profile. Caching applies per capped slice, not per whole file, since that's now all a single response ever contains.
+- **Offline handling** — a global `OfflineGuard` overlay blocks the entire app while `navigator.onLine` is false (checked on load, not just via the `offline` event, so a refresh while offline still shows it), clearing only on the `online` event. Within the player itself, `playableSeekTime()` additionally clamps a forward seek to the contiguously-buffered range while offline, and `handleTimeUpdate` pauses playback with a notice once it reaches the edge of what's actually been downloaded.
+- A `stream-cache-worker.js` service worker additionally caches the first capped slice of each stream in the Cache Storage API as a complementary, best-effort browser-side cache; it is not required for correctness and passes through to the network for anything it doesn't have cached. Caching now happens via `event.waitUntil()` in the background rather than being awaited inline, so it can no longer delay bytes reaching the `<audio>` element (see [ADR-0007](adr/0007-server-side-capped-byte-range-chunking.md)).
 
 ## 8. Data model summary
 

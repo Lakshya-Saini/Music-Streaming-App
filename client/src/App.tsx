@@ -2,6 +2,7 @@ import { CssBaseline, ThemeProvider } from '@mui/material';
 import { useEffect, useMemo, useState } from 'react';
 import { Route, Routes } from 'react-router-dom';
 import { AppShell } from './components/layout/AppShell';
+import { OfflineGuard } from './components/OfflineGuard';
 import { BrowsePage } from './pages/BrowsePage';
 import { HomePage } from './pages/HomePage';
 import { PlaylistsPage } from './pages/PlaylistsPage';
@@ -29,6 +30,7 @@ export function App() {
   return (
     <ThemeProvider theme={theme}>
       <CssBaseline />
+      <OfflineGuard />
       <LibraryProvider>
         <Routes>
           <Route element={<AppShell mode={mode} onToggleMode={toggleMode} />}>

@@ -41,6 +41,18 @@ then restarted the server so Mongoose's `autoIndex` recreated the index using th
 
 ---
 
+## A single stream request downloaded the entire track regardless of network conditions
+
+**Symptom:** Across Fast 4G, Slow 4G, and 3G throttling profiles, playing a track produced only one `GET /tracks/:id/stream` request for the actual playback audio (separate from the throughput probe), and that request's `Content-Length` matched the whole rendition's size — several megabytes for a single response, even on a throttled connection where the adaptive-bitrate logic had correctly picked a lower-bitrate rendition.
+
+**Root cause:** `TracksService.createStreamingResponse` forwarded the incoming `Range` header straight through to `AudioStorageService.getObjectStream`'s S3 `GetObjectCommand` unmodified. Browsers commonly request an open-ended range (`Range: bytes=0-`) for a media element, and S3 honors that literally — it returns everything from that byte to the end of the object in one `206` response. Nothing capped how much of the file a single request could return.
+
+**Fix:** Added `TracksService.resolveStreamRange`, which clamps every request — bounded, open-ended, or missing a `Range` header entirely — to at most ~1/10th of the rendition's total size (clamped between 256 KB and 2 MB). The `<audio>` element already re-requests more data on its own once its buffer runs low relative to the `Content-Range` it received, so no client-side change was needed to make this segmented delivery actually happen. Full detail: [ADR-0007](../adr/0007-server-side-capped-byte-range-chunking.md).
+
+**Verification:** Server access logs after the fix show many sequential `bytes=X-Y/total` requests advancing across a single play-through (e.g. `0-961129/9611297`, then `961130-1922259/9611297`, ...), spaced out over the course of playback rather than one log line per track.
+
+---
+
 ## Docker-served client masking source changes during development
 
 Not a server bug, but recorded here since it repeatedly caused confusion while iterating on server-adjacent behavior (stream headers, error responses) verified through the browser: `http://localhost:5173` resolves via IPv6 by default on this host, which was being served by the **Dockerized** Nginx client container running an older build, while a separately-running local Vite dev process (bound via IPv4) held the actual up-to-date code on what looked like the same URL. Any client-visible verification of a server change needs the Docker client image rebuilt and redeployed first:

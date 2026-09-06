@@ -20,10 +20,11 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  event.respondWith(handleStreamRange(event.request, range));
+  event.respondWith(handleStreamRange(event, range));
 });
 
-async function handleStreamRange(request, rangeHeader) {
+async function handleStreamRange(event, rangeHeader) {
+  const request = event.request;
   const requested = parseRange(rangeHeader);
   if (!requested) {
     return fetch(request);
@@ -37,7 +38,16 @@ async function handleStreamRange(request, rangeHeader) {
 
   const response = await fetch(request);
   if (response.status === 206 && requested.start === 0) {
-    await cachePrefix(request.url, response.clone());
+    /**
+     * Caching must not block the response: awaiting it here would hold up
+     * every byte from reaching the <audio> element until this clone's body
+     * had been fully read, which - once the server started returning larger
+     * ranges - meant playback couldn't start until an entire chunk (or, before
+     * the server capped ranges, the whole file) had downloaded twice over.
+     * `waitUntil` lets the real response go out immediately while caching
+     * happens in the background.
+     */
+    event.waitUntil(cachePrefix(request.url, response.clone()));
   }
 
   return response;
