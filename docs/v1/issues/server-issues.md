@@ -53,6 +53,12 @@ then restarted the server so Mongoose's `autoIndex` recreated the index using th
 
 ---
 
+## 499 responses during a quality switch are expected
+
+Not a bug — recorded so a future reader doesn't mistake it for one, and doesn't conflate it with the unrelated transient-503 issue above. When the client switches rendition mid-playback (`switchToAsset()` in `MusicPlayer.tsx`, triggered by `maybeUpgradeQuality()` or `downgradeQuality()`), it sets `audio.src` to the new quality's URL while a chunk request for the *old* quality may still be in flight. The browser aborts that in-flight request as soon as the source changes, which nginx/the access log records as a `499` ("client closed request") with `0` bytes. This is the expected, harmless side effect of an in-place quality switch, not a server error or a dropped connection — it will reliably appear once per upgrade/downgrade and requires no handling.
+
+---
+
 ## Docker-served client masking source changes during development
 
 Not a server bug, but recorded here since it repeatedly caused confusion while iterating on server-adjacent behavior (stream headers, error responses) verified through the browser: `http://localhost:5173` resolves via IPv6 by default on this host, which was being served by the **Dockerized** Nginx client container running an older build, while a separately-running local Vite dev process (bound via IPv4) held the actual up-to-date code on what looked like the same URL. Any client-visible verification of a server change needs the Docker client image rebuilt and redeployed first:
