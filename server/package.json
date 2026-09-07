@@ -11,7 +11,8 @@
     "start:prod": "node dist/main.js",
     "lint": "eslint \"src/**/*.ts\"",
     "format": "prettier --write \"src/**/*.ts\"",
-    "seed:admin": "node scripts/seed-admin.js"
+    "seed:admin": "node scripts/seed-admin.js",
+    "upload:local": "node scripts/upload-local-tracks.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.864.0",

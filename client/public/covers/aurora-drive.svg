@@ -1,13 +1,38 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
   <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop stop-color="#246bfe"/>
-      <stop offset=".55" stop-color="#12a28c"/>
-      <stop offset="1" stop-color="#172033"/>
+    <clipPath id="frame"><rect width="512" height="512" rx="36"/></clipPath>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1a0b12"/>
+      <stop offset="1" stop-color="#0a0a12"/>
     </linearGradient>
+    <radialGradient id="orb" cx="0.32" cy="0.3" r="0.62">
+      <stop offset="0" stop-color="#ff6a5c"/>
+      <stop offset=".55" stop-color="#fa233b"/>
+      <stop offset="1" stop-color="#7a0f22"/>
+    </radialGradient>
+    <linearGradient id="band" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4a1030"/>
+      <stop offset="1" stop-color="#22081c"/>
+    </linearGradient>
+    <radialGradient id="vignette" cx="0.4" cy="0.35" r="0.9">
+      <stop offset="0" stop-color="#000" stop-opacity="0"/>
+      <stop offset=".7" stop-color="#000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000" stop-opacity=".38"/>
+    </radialGradient>
+    <filter id="grain">
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="4" result="n"/>
+      <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.05 0"/>
+    </filter>
   </defs>
-  <rect width="512" height="512" rx="36" fill="url(#g)"/>
-  <circle cx="370" cy="128" r="72" fill="#ffffff" opacity=".22"/>
-  <path d="M74 352c88-118 177-118 265 0 32 42 65 58 99 47v39H74z" fill="#fff" opacity=".3"/>
-  <path d="M92 391c84-76 168-76 252 0 34 31 65 40 92 28v39H92z" fill="#07111f" opacity=".45"/>
+  <g clip-path="url(#frame)">
+    <rect width="512" height="512" fill="url(#bg)"/>
+    <path d="M512 336 340 512H512z" fill="url(#band)"/>
+    <circle cx="184" cy="168" r="150" fill="url(#orb)"/>
+    <circle cx="184" cy="168" r="150" fill="none" stroke="#ffffff" stroke-opacity="0.08" stroke-width="1.5"/>
+    <circle cx="392" cy="94" r="5" fill="#ffffff" opacity=".5"/>
+    <circle cx="420" cy="146" r="3" fill="#ffffff" opacity=".35"/>
+    <circle cx="360" cy="60" r="2.4" fill="#ffffff" opacity=".4"/>
+    <rect width="512" height="512" fill="url(#vignette)"/>
+    <rect width="512" height="512" filter="url(#grain)"/>
+  </g>
 </svg>
