@@ -45,6 +45,16 @@ interface PlayerNotice {
 const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 /** How often, while playing, to re-check whether the connection can now sustain a higher rendition. */
 const UPGRADE_CHECK_INTERVAL_MS = 25000;
+/**
+ * How long to wait after the last seek request before actually writing
+ * audio.currentTime. Each write aborts whatever range request is in flight
+ * and starts a new one, so seeking repeatedly in quick succession (dragging
+ * the slider, mashing the arrow keys) without this would fire off a burst of
+ * aborted/restarted requests back-to-back, which can push the media resource
+ * into a real network error. Coalescing to the last requested position
+ * avoids that burst entirely.
+ */
+const SEEK_DEBOUNCE_MS = 150;
 
 export function MusicPlayer({
   tracks,
@@ -58,6 +68,9 @@ export function MusicPlayer({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const loadRequestRef = useRef(0);
   const stallTimestampsRef = useRef<number[]>([]);
+  const seekDebounceRef = useRef<number | null>(null);
+  const isSeekingRef = useRef(false);
+  const switchRequestRef = useRef(0);
   const [speedAnchor, setSpeedAnchor] = useState<HTMLElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
@@ -106,6 +119,11 @@ export function MusicPlayer({
     clearNotice();
     setCurrentAsset(null);
     stallTimestampsRef.current = [];
+    switchRequestRef.current += 1;
+    if (seekDebounceRef.current !== null) {
+      window.clearTimeout(seekDebounceRef.current);
+      seekDebounceRef.current = null;
+    }
 
     if (!audio) return;
     audio.pause();
@@ -121,6 +139,7 @@ export function MusicPlayer({
           setPlaying(true);
         } catch {
           setPlaying(false);
+          resetStream();
           showError('Playback could not start for this track.');
         }
       })();
@@ -243,10 +262,42 @@ export function MusicPlayer({
     return asset;
   };
 
-  /** Swaps to a different rendition in place, preserving position and resuming playback if it was already playing. */
+  /**
+   * Detaches the current (broken) media resource so the next play attempt
+   * starts over from scratch instead of retrying the same dead resource.
+   * Without this, ensureStreamReady's `audio.src && currentAsset` check keeps
+   * short-circuiting to the same errored resource forever, so a genuine
+   * playback failure looks fixable ("just press play again") but silently
+   * never recovers until the page is refreshed.
+   */
+  const resetStream = () => {
+    const audio = audioRef.current;
+    setCurrentAsset(null);
+    switchRequestRef.current += 1;
+    if (!audio) return;
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+  };
+
+  /**
+   * Swaps to a different rendition in place, preserving position and resuming
+   * playback if it was already playing. Guarded by switchRequestRef because
+   * downgradeQuality/maybeUpgradeQuality can each fire independently (a
+   * stall-triggered downgrade, a periodic upgrade probe, another downgrade
+   * before the previous switch even finished loading) - without the guard, an
+   * older switch's `loadedmetadata` can resolve after a newer one has already
+   * taken over, stomping its currentTime/play() and racing the resource out
+   * from under it, which surfaces as a spurious "could not resume" error.
+   * Only the most recently requested switch is allowed to act.
+   */
   const switchToAsset = (nextAsset: AudioAsset, noticeText: string) => {
     const audio = audioRef.current;
     if (!audio) return;
+    if (currentAsset?.id === nextAsset.id) return;
+
+    const requestId = switchRequestRef.current + 1;
+    switchRequestRef.current = requestId;
 
     const resumeAt = audio.currentTime;
     const wasPlaying = playing;
@@ -256,9 +307,14 @@ export function MusicPlayer({
 
     const onReady = () => {
       audio.removeEventListener('loadedmetadata', onReady);
+      if (switchRequestRef.current !== requestId || audioRef.current !== audio) return;
       audio.currentTime = resumeAt;
       if (wasPlaying) {
-        void audio.play().catch(() => showError('Playback could not resume after switching quality.'));
+        void audio.play().catch(() => {
+          if (switchRequestRef.current !== requestId) return;
+          resetStream();
+          showError('Playback could not resume after switching quality.');
+        });
       }
       clearNotice();
     };
@@ -308,6 +364,7 @@ export function MusicPlayer({
       clearNotice();
     } catch {
       setPlaying(false);
+      resetStream();
       showError('Playback could not start. Check the network request for the stream endpoint.');
     }
   };
@@ -345,8 +402,17 @@ export function MusicPlayer({
       showError('That part has not been streamed yet. Reconnect to jump further.');
     }
 
-    audio.currentTime = nextTime;
     setCurrentTime(nextTime);
+
+    if (seekDebounceRef.current !== null) {
+      window.clearTimeout(seekDebounceRef.current);
+    }
+    seekDebounceRef.current = window.setTimeout(() => {
+      seekDebounceRef.current = null;
+      if (audioRef.current) {
+        audioRef.current.currentTime = nextTime;
+      }
+    }, SEEK_DEBOUNCE_MS);
   };
 
   const handleTimeUpdate = (audio: HTMLAudioElement) => {
@@ -380,11 +446,20 @@ export function MusicPlayer({
 
   const handlePlayerError = () => {
     setPlaying(false);
+    resetStream();
     showError('Streaming failed. The track may still be processing, the connection may be offline, or the S3 object may be unavailable.');
   };
 
-  /** Two stalls within 20s means the current rendition is too heavy for this connection - drop a tier. */
+  /**
+   * Two stalls within 20s means the current rendition is too heavy for this
+   * connection - drop a tier. Seeking to an unbuffered position naturally
+   * fires `waiting` too while the new range loads, but that's expected
+   * seek latency, not a bandwidth problem - counting it here would cascade
+   * the quality straight down to the bottom tier just from seeking around,
+   * with nothing wrong with the connection.
+   */
   const handleWaiting = () => {
+    if (isSeekingRef.current) return;
     showBuffering('Buffering audio...');
     const now = Date.now();
     const recentStalls = [...stallTimestampsRef.current, now].filter((timestamp) => now - timestamp < 20000);
@@ -436,8 +511,14 @@ export function MusicPlayer({
         onProgress={updateBufferedTime}
         onCanPlay={updateBufferedTime}
         onWaiting={handleWaiting}
-        onSeeking={() => showBuffering('Seeking...')}
-        onSeeked={() => clearNotice()}
+        onSeeking={() => {
+          isSeekingRef.current = true;
+          showBuffering('Seeking...');
+        }}
+        onSeeked={() => {
+          isSeekingRef.current = false;
+          clearNotice();
+        }}
         onPlaying={() => {
           setPlaying(true);
           clearNotice();
