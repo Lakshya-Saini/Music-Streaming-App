@@ -13,7 +13,7 @@ The app is three moving pieces — a static SPA behind Nginx, a NestJS API that 
 
 | Option | How it'd run this app | Approx. cost (24/7, always-on) | Pros | Cons |
 |---|---|---|---|---|
-| **EC2 (single instance) + Docker Compose** — *recommended* | The existing `docker-compose.yml` runs almost unchanged on one small VM | **~$8–15/month** (compute + disk; see cost breakdown below) | Cheapest 24/7 compute AWS offers; runs the repo's existing Docker Compose setup with minimal changes; full control over the box; free Elastic IP while attached | You manage OS patching, Docker updates, and backups yourself; single point of failure unless paired with instance recovery (see guide) |
+| **EC2 (single instance) + Docker Compose** — *recommended* | The existing `docker-compose.yml` runs almost unchanged on one small VM | **~$16–19/month** (compute + disk; see cost breakdown below) | Cheapest 24/7 compute AWS offers; runs the repo's existing Docker Compose setup with minimal changes; full control over the box; free Elastic IP while attached | You manage OS patching, Docker updates, and backups yourself; single point of failure unless paired with instance recovery (see guide) |
 | **AWS Lightsail** | A Lightsail instance bundle running the same Docker Compose stack | ~$10–20/month (fixed bundle price, includes a static IP + data transfer allowance) | Simpler console, predictable flat pricing, static IP included free | Less flexible than raw EC2 (fixed bundles), no meaningful cost advantage over EC2 at this scale, still self-managed |
 | **ECS Fargate** (1 task running the containers) | Same containers, no EC2 host to patch — AWS manages the underlying compute | ~$25–40/month (per-vCPU/GB-hour billing has no idle discount; typically also needs an Application Load Balancer at ~$16/month minimum to get a stable public endpoint) | No OS/host maintenance; easy to scale later | Meaningfully more expensive than a single EC2 instance for a constantly-on, low-traffic workload; still needs a persistent volume story for Mongo (EFS) or an external Mongo service, adding more moving parts |
 | **AWS App Runner** | The API and client would need to be separate App Runner services; MongoDB can't run inside App Runner at all | ~$25–50+/month once you add a managed Mongo (Atlas) and can't easily co-locate `ffmpeg`/`yt-dlp` binaries with default runtimes without a custom image anyway | Fully managed, auto-TLS, simplest App Runner-native config for a *stateless single container* | Doesn't fit this app's shape well — needs the Docker Compose stack split into multiple managed services plus an external database, more expensive and more complex than it looks for what is a small always-on app |
@@ -22,7 +22,7 @@ The app is three moving pieces — a static SPA behind Nginx, a NestJS API that 
 
 ## Recommendation
 
-**A single EC2 instance running the existing `docker-compose.yml`, paired with MongoDB Atlas's free tier (M0) instead of self-hosting Mongo in a container.**
+**A single EC2 instance running the existing `docker-compose.yml`, paired with MongoDB Atlas's free tier (M0) instead of self-hosting Mongo in a container, with all runtime configuration pulled from AWS Secrets Manager rather than a `.env` file.**
 
 Why this combination specifically, not just "EC2":
 
@@ -35,16 +35,17 @@ Why this combination specifically, not just "EC2":
 
 | Item | Estimated cost |
 |---|---|
-| EC2 `t4g.small` (2 GiB RAM, ARM/Graviton, on-demand, us-east-1) | ~$12/month (check the [EC2 pricing page](https://aws.amazon.com/ec2/pricing/on-demand/) for current rates and your region; a 1-year Savings Plan brings this down further) |
+| EC2 `t3.small` (2 GiB RAM, x86_64, on-demand) | ~$15/month (check the [EC2 pricing page](https://aws.amazon.com/ec2/pricing/on-demand/) for current rates and your region; a 1-year Savings Plan brings this down further; a Graviton `t4g.small` on an arm64 AMI runs the same setup for somewhat less) |
 | EBS `gp3` 20 GB root volume | ~$1.60/month |
 | Elastic IP | $0 while attached to a running instance |
 | Data transfer out | First 100 GB/month is AWS's account-wide free allowance; $0.09/GB after that |
 | S3 (Standard storage + requests, small catalog) | ~$1–3/month at a few hundred tracks |
+| Secrets Manager (1 secret) | ~$0.40/month + negligible API call cost |
 | MongoDB Atlas M0 | $0 (free tier) |
-| Route 53 hosted zone (optional, only if using a custom domain) | ~$0.50/month + ~$12/year domain registration |
+| Domain + DNS hosting (optional, only if using a custom domain) | Varies by registrar/provider — typically ~$0–1/month + annual registration |
 | TLS certificate (Let's Encrypt) | $0 |
-| **Total** | **≈ $10–18/month**, depending on whether you use a custom domain |
+| **Total** | **≈ $15–22/month**, depending on whether you use a custom domain |
 
-If you want to go even lower and traffic is genuinely light (personal project, few concurrent listeners), a `t4g.micro` (1 GiB RAM) can work, but `ffmpeg` encoding four renditions at once will be noticeably slower and RAM will be tight if the API, Nginx, and an encode job overlap — `t4g.small` is the recommendation for headroom without materially higher cost.
+**Do not use `t3.micro` (1 GiB RAM)** even though it's cheaper — building both Docker images (`npm ci`/`tsc` for the server, `npm ci`/Vite for the client, plus installing `ffmpeg`/`yt-dlp`) is memory-hungry enough to stall for a very long time or thrash on swap at 1 GiB, and the same box needs headroom at runtime for `ffmpeg` transcoding. `t3.small`/`t4g.small` is the practical minimum, not just a comfort margin.
 
 See [`DEPLOYMENT_GUIDE.md`](DEPLOYMENT_GUIDE.md) for step-by-step setup instructions for this recommended option.
