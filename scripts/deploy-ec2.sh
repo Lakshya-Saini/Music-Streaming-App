@@ -40,7 +40,7 @@ docker compose -f docker-compose.prod.yml up --build -d
 docker compose -f docker-compose.prod.yml ps
 
 for attempt in {1..30}; do
-  if curl -fsS http://127.0.0.1/api/v1/tracks >/dev/null; then
+  if curl -fsS http://127.0.0.1:8080/api/v1/tracks >/dev/null; then
     echo "Music Streaming App deployment healthy"
     exit 0
   fi
